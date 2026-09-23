@@ -1,0 +1,65 @@
+{
+  "name": "policy_preprocessor",
+  "steps": [
+    {
+      "registry_name": "rename_observations_processor",
+      "config": {
+        "rename_map": {}
+      }
+    },
+    {
+      "registry_name": "to_batch_processor",
+      "config": {}
+    },
+    {
+      "registry_name": "device_processor",
+      "config": {
+        "device": "cuda",
+        "float_dtype": null
+      }
+    },
+    {
+      "registry_name": "flux3_observation_history_normalizer",
+      "config": {
+        "action_dim": 6,
+        "action_representation": "delta",
+        "absolute_dims": [
+          -1
+        ],
+        "normalization_clip": 6.0,
+        "n_obs_steps": 8,
+        "chunk_size": 42,
+        "camera_keys": [
+          "observation.images.scene",
+          "observation.images.wrist"
+        ],
+        "condition_on_past_actions": true
+      },
+      "state_file": "policy_preprocessor_step_3_flux3_observation_history_normalizer.safetensors"
+    },
+    {
+      "registry_name": "flux3_action_target_normalizer",
+      "config": {
+        "action_dim": 6,
+        "action_representation": "delta",
+        "absolute_dims": [
+          -1
+        ],
+        "normalization_clip": 6.0,
+        "n_obs_steps": 8,
+        "chunk_size": 42
+      },
+      "state_file": "policy_preprocessor_step_4_flux3_action_target_normalizer.safetensors"
+    },
+    {
+      "registry_name": "flux3_camera_resize",
+      "config": {
+        "camera_keys": [
+          "observation.images.scene",
+          "observation.images.wrist"
+        ],
+        "camera_layout": "side_by_side"
+      }
+    }
+  ]
+}

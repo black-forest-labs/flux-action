@@ -1,0 +1,131 @@
+{
+  "type": "flux3",
+  "n_obs_steps": 8,
+  "input_features": {
+    "observation.images.scene": {
+      "type": "VISUAL",
+      "shape": [
+        3,
+        256,
+        256
+      ]
+    },
+    "observation.images.wrist": {
+      "type": "VISUAL",
+      "shape": [
+        3,
+        256,
+        256
+      ]
+    },
+    "observation.state": {
+      "type": "STATE",
+      "shape": [
+        6
+      ]
+    }
+  },
+  "output_features": {
+    "action": {
+      "type": "ACTION",
+      "shape": [
+        6
+      ]
+    }
+  },
+  "device": "cuda",
+  "use_amp": false,
+  "use_peft": false,
+  "push_to_hub": false,
+  "repo_id": null,
+  "private": null,
+  "tags": null,
+  "license": null,
+  "pretrained_path": null,
+  "pretrained_revision": null,
+  "conditioning": "history",
+  "packer": null,
+  "condition_on_past_actions": true,
+  "action_representation": "delta",
+  "delta_absolute_dims": [
+    -1
+  ],
+  "text_fixed_length": 320,
+  "video_position_fps": 24.0,
+  "history_snapshots": 2,
+  "normalization_stats": null,
+  "normalization_clip": 6.0,
+  "separate_timesteps": true,
+  "video_logit_mean": 1.08,
+  "video_logit_std": 1.0,
+  "conditioning_noise_max": 0.2,
+  "loss_reduction": "modalities",
+  "action_channel_weights": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    2.0
+  ],
+  "gradient_checkpointing": true,
+  "chunk_size": 42,
+  "n_action_steps": 32,
+  "fps": 30.0,
+  "camera_layout": "side_by_side",
+  "camera_keys": [
+    "observation.images.scene",
+    "observation.images.wrist"
+  ],
+  "canvas_hw": [
+    256,
+    512
+  ],
+  "action_modality": "action",
+  "action_scale": 2.0,
+  "gripper_flip_dims": [],
+  "use_relative_actions": false,
+  "relative_exclude_joints": [
+    "gripper"
+  ],
+  "action_feature_names": null,
+  "normalization_mapping": {
+    "VISUAL": "IDENTITY",
+    "STATE": "IDENTITY",
+    "ACTION": "IDENTITY"
+  },
+  "trunk_weights": null,
+  "video_vae_id": "video_vae.safetensors",
+  "text_encoder_id": "text_encoder",
+  "dit_config": null,
+  "attn_mode": "torch",
+  "dtype": "bfloat16",
+  "compile_model": false,
+  "sampler": "euler",
+  "num_inference_steps": 4,
+  "guidance_scale": 3.0,
+  "guidance_scale_action": null,
+  "sampler_shift": 6.93,
+  "inference_seed": 42,
+  "head_init_seed": 0,
+  "train_timestep_width": 0.75,
+  "train_timestep_shift": 42.0,
+  "action_loss_weight": 0.5,
+  "video_loss_weight": 1.0,
+  "caption_dropout": 0.1,
+  "augment": false,
+  "optimizer_lr": 0.0001,
+  "optimizer_lr_heads_multiplier": 5.0,
+  "optimizer_betas": [
+    0.9,
+    0.999
+  ],
+  "optimizer_eps": 1e-08,
+  "optimizer_weight_decay": 0.0,
+  "optimizer_grad_clip_norm": 1.0,
+  "scheduler_freeze_backbone_steps": 0,
+  "scheduler_warmup_steps": 0,
+  "scheduler_warmup_steps_heads": 0,
+  "scheduler_decay_steps": 0,
+  "scheduler_cooldown_steps": 0
+}

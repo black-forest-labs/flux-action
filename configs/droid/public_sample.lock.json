@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "dataset_id": "nvidia/Cosmos3-DROID",
+  "dataset_revision": "5c11a20accb11497270a5247a7f1e66ad04c956c",
+  "filter_repo_id": "KarlP/droid",
+  "filter_repo_type": "model",
+  "filter_revision": "bcb840c3b496533e0adf548a54b51f2f00057837",
+  "filter_file": "keep_ranges_1_0_1.json",
+  "files": {
+    "keep_ranges_1_0_1.json": "efee695f8228fe19d4f01767b95ab612084c499c8a59421c5f3d2c7ad5f3625e",
+    "success/data/chunk-000/file-000.parquet": "f1853148a9ccdef22f075167776340d46e9a05ddce3d8f73b3efde6ee0e64157",
+    "success/meta/episodes/chunk-000/file-000.parquet": "34c4593b97aa4696580ef974b77c711395cec22ed22ae99ef70b2bf4101b9917",
+    "success/meta/info.json": "bde3ee8b4c6a437ad530630bb8a6954ba9eafb80e3fdfc0e983252aeaff2d30a",
+    "success/meta/tasks.parquet": "497e5b675bc75460fae7fc6e81d6689a7a1ce85b6cdd136e14616f4b72cf7f44",
+    "success/videos/observation.image.exterior_image_1_left/chunk-000/file-000.mp4": "b166618fe3c4599edccbfda885c78376eb670f4c9fbdd7153f848c24d9c21892",
+    "success/videos/observation.image.exterior_image_2_left/chunk-000/file-000.mp4": "83d705aeac355a638aa174c21be36a8462e280edce11b28fa40d2eacaf35fc64",
+    "success/videos/observation.image.wrist_image_left/chunk-000/file-000.mp4": "4ba025bedd6c73dc73bd67e7adff9bf757c5a066f758ced9675038a2842c1d07"
+  }
+}
