@@ -2,9 +2,16 @@
 
 <img src="docs/assets/flux-3-action-hero.webp" width="100%" alt="FLUX 3 Action: robot manipulation, driving and game clips">
 
-Standalone full fine-tuning and action prediction for FLUX 3 Action.
-The package includes data preparation, distributed training, checkpoint/resume, export and inference.
-SO-101 task LoRA uses the linked LeRobot integration.
+FLUX 3 Action is an open weights 7B world action model from [Black Forest Labs](https://bfl.ai/models/flux-3-action).
+It takes camera frames, the robot's state and a text instruction, and returns the next chunk of actions,
+denoised together with the next video frames.
+
+This repository is the standalone training and inference code for robots, simulators and games.
+
+[Weights](https://huggingface.co/collections/black-forest-labs/flux-3-action) ·
+[Documentation](https://docs.bfl.ai/flux_3/flux3_action_overview) ·
+[Blog post](https://huggingface.co/blog/black-forest-labs/flux-3-action) ·
+[LeRobot integration](https://huggingface.co/docs/lerobot/main/en/flux3)
 
 `transformer.py`, `transformer_inf_bf16.py` and `transformer_inf_fp8r.py` keep training and inference implementations separate so readers, especially coding agents, can follow each path directly without tracing inheritance or configuration branches.
 
