@@ -25,7 +25,7 @@ from .processing import packing
 # so a trunk without the image and audio streams predicts identical actions.
 CONTENT_STREAMS = ("video", "video_cond", "image", "image_cond", "audio", "audio_cond")
 REQUIRED_CONTENT_STREAMS = ("video", "video_cond")
-ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta")
+ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta", "joint_relative")
 
 # Inference settings the selected DROID checkpoint was chosen and benchmarked with: Cosmos UniPC,
 # four denoising steps, inference timestep shift 5 (distinct from the training shift 42), guidance
@@ -63,7 +63,9 @@ class PolicyConfig:
     # stored (DROID). "joint_delta": per-frame differences a[t] - a[t-1] on every channel except
     # absolute_action_dims, which stay absolute (SO-101: the gripper); a training window then needs the
     # command before its first one (``action_prev`` in the batch), and inference integrates the predicted
-    # deltas onto the observed state (target[k] = state + sum(delta[:k + 1])), open loop.
+    # deltas onto the observed state (target[k] = state + sum(delta[:k + 1])), open loop. "joint_relative": every
+    # command of the chunk minus the measured state at request time (the last observed state), again except
+    # absolute_action_dims; inference adds the predicted targets back onto that one state, without integration.
     action_parameterization: str = "absolute"
     absolute_action_dims: tuple[int, ...] = ()
     # Range normalization of the action targets and of the state token, per channel:
@@ -224,7 +226,7 @@ class PolicyConfig:
         assert self.action_parameterization != "absolute" or not self.absolute_action_dims, (
             "absolute actions cannot mix delta dimensions"
         )
-        if self.action_parameterization == "joint_delta":
+        if self.action_parameterization in ("joint_delta", "joint_relative"):
             absolute = {d % self.action_dim for d in self.absolute_action_dims}
             assert all(d % self.action_dim in absolute for d in self.gripper_flip_dims), (
                 "gripper dimensions must stay absolute"

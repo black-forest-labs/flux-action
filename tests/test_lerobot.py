@@ -767,6 +767,44 @@ def test_history_trainer_resume_and_offline_evaluation(v3, tmp_path, monkeypatch
         ).build()
 
 
+def test_relative_history_evaluation_anchors_at_the_measured_state(v3, monkeypatch):
+    from flux_action.inference.evaluate import evaluate_policy
+    from flux_action.training.data import collate_windows
+
+    source, out, _ = v3
+    config = PolicyConfig(
+        **{
+            **TINY_POLICY,
+            "action_parameterization": "joint_relative",
+            "inference_profile": "history",
+            "n_obs_steps": 8,
+            "history_snapshots": 2,
+            "condition_on_past_actions": True,
+        }
+    )
+    policy = tiny_policy(config).eval()
+    dataset = WindowDataset(
+        load_manifest(out / "manifest.json"),
+        source,
+        out / "rows.f32.npy",
+        seed=0,
+        frame_hw=FRAME_HW,
+        decoder="pyav",
+        n_obs_steps=8,
+    )
+    samples = [
+        collate_windows([dataset.window_at(i, dataset.valid_starts(i)[0])])
+        for i in range(len(dataset.episodes))
+    ]
+    # the synthetic follower state differs from the commands, so the command anchor would be wrong
+    assert not torch.allclose(samples[0]["state"][:, -1], samples[0]["command_history"][:, -1])
+    targets = iter(policy.training_targets(sample) for sample in samples)
+    monkeypatch.setattr(policy, "predict_normalized_targets", lambda observation: next(targets))
+    report = evaluate_policy(policy, source, out, split="train", windows_per_episode=1, frame_hw=FRAME_HW)
+    assert report["action_mse_normalized"] == 0.0
+    assert report["action_mse_raw"] < 1e-6
+
+
 def test_history_recipe_requires_matching_index_horizon(v3, tmp_path):
     source, out, _ = v3
 

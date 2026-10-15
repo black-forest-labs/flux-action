@@ -355,8 +355,10 @@ Exports contain the DiT and configuration with verified checksums; frozen encode
 external references and are not checksummed. They contain no training state.
 
 `predict_action_chunk` produces absolute commands in dataset units. For joint-delta policies,
-it integrates predicted deltas onto measured state. `select_action` queues `n_action_steps`
-commands before replanning and continues joint deltas from the last returned command.
+it integrates predicted deltas onto measured state; for joint-relative policies, it adds every
+predicted offset to the measured state at request time. `select_action` queues `n_action_steps`
+commands before replanning and continues joint deltas from the last returned command; a
+joint-relative chunk is anchored at the state measured when it was requested.
 Call `reset` at episode boundaries, interventions or task/batch changes. The application owns
 control timing and execution; RTC arguments are unsupported.
 

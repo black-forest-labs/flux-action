@@ -447,12 +447,16 @@ class FluxActionPolicy(nn.Module):
         return normalization.normalize(state, self.config.state_normalization, self.config.normalization_clip)
 
     def _action_targets(self, actions: Tensor, previous: Tensor | None) -> Tensor:
-        """Flipped commands ``(B, K, D)`` -> normalized training targets: the commands themselves, or their
-        per-frame deltas from ``previous`` (the command before the window) under ``joint_delta``."""
+        """Flipped commands ``(B, K, D)`` -> normalized training targets: the commands themselves, their
+        per-frame deltas from ``previous`` (the command before the window) under ``joint_delta``, or their
+        offsets from ``previous`` (the measured state at request time) under ``joint_relative``."""
         cfg = self.config
         if cfg.action_parameterization == "joint_delta":
             assert previous is not None, "joint deltas require action_prev"
             actions = normalization.deltas(actions, self._flip(previous.float()), cfg.absolute_action_dims)
+        elif cfg.action_parameterization == "joint_relative":
+            assert previous is not None, "relative actions require the measured state"
+            actions = normalization.relative(actions, self._flip(previous.float()), cfg.absolute_action_dims)
         return normalization.normalize(actions, cfg.action_normalization, cfg.normalization_clip)
 
     def _targets_to_actions(self, targets: Tensor, state: Tensor) -> Tensor:
@@ -462,7 +466,19 @@ class FluxActionPolicy(nn.Module):
         targets = normalization.denormalize(targets, cfg.action_normalization)
         if cfg.action_parameterization == "joint_delta":
             targets = normalization.integrate(targets, state, cfg.absolute_action_dims)
+        elif cfg.action_parameterization == "joint_relative":
+            targets = normalization.from_relative(targets, state, cfg.absolute_action_dims)
         return targets
+
+    def _action_reference(self, batch: dict[str, Any]) -> Tensor | None:
+        """What a window's targets are taken against: the measured state at request time under
+        ``joint_relative``, else the command before the window (``joint_delta``; unused when absolute)."""
+        if self.config.action_parameterization == "joint_relative":
+            state = batch[OBS_STATE]
+            return state[:, -1] if state.ndim == 3 else state
+        if self.config.inference_profile == "history":
+            return batch["command_history"][:, -1]
+        return batch.get(ACTION_PREV)
 
     @staticmethod
     def _captions(batch: dict[str, Any], batch_size: int) -> list[str]:
@@ -579,10 +595,8 @@ class FluxActionPolicy(nn.Module):
             if commands is None:
                 raise ValueError("history training requires absolute command_history")
             state = history.conditioning_values(batch["state"], commands, cfg)
-            previous = commands[:, -1]
         else:
             state = self._normalize_state(self._flip(self._state(batch)))
-            previous = batch.get(ACTION_PREV)
         if state.shape[0] != b:
             raise ValueError("state and cameras must have the same batch size")
         state = state.to(device, non_blocking=True)
@@ -591,7 +605,7 @@ class FluxActionPolicy(nn.Module):
             raise ValueError(
                 f"actions must be (B, {cfg.chunk_size}, {cfg.action_dim}), got {tuple(actions.shape)}"
             )
-        actions = self._action_targets(actions, previous).to(device, non_blocking=True)
+        actions = self._action_targets(actions, self._action_reference(batch)).to(device, non_blocking=True)
         keep = self._valid_windows(batch, b, device)
         captions = self._captions(batch, b)
         generators = self._window_generators(batch, b)
@@ -947,22 +961,21 @@ class FluxActionPolicy(nn.Module):
     @torch.no_grad()
     def training_targets(self, batch: dict[str, Any]) -> Tensor:
         """The normalized targets a training window carries, ``(B, chunk_size, action_dim)``: flip, deltas from
-        ``action_prev`` under ``joint_delta``, range normalization. Comparable to :meth:`predict_normalized_targets`."""
+        ``action_prev`` under ``joint_delta`` or offsets from the measured state under ``joint_relative``, range
+        normalization. Comparable to :meth:`predict_normalized_targets`."""
         cfg = self.config
         actions = self._flip(batch[ACTION].float())
         if actions.ndim != 3 or actions.shape[1:] != (cfg.chunk_size, cfg.action_dim):
             raise ValueError(
                 f"actions must be (B, {cfg.chunk_size}, {cfg.action_dim}), got {tuple(actions.shape)}"
             )
-        previous = (
-            batch["command_history"][:, -1] if cfg.inference_profile == "history" else batch.get(ACTION_PREV)
-        )
-        return self._action_targets(actions, previous)
+        return self._action_targets(actions, self._action_reference(batch))
 
     @torch.no_grad()
     def predict_normalized_targets(self, batch: dict[str, Any]) -> Tensor:
         """Observation batch -> ``(B, chunk_size, action_dim)`` predicted targets in the trained action space:
-        normalized, deltas under ``joint_delta``, before denormalization and integration."""
+        normalized, deltas under ``joint_delta`` or offsets under ``joint_relative``, before denormalization and
+        integration."""
         self.config.validate_inference()
         if self._inference_prepared and self.dit._compiled_hot is not None:
             torch.compiler.cudagraph_mark_step_begin()
@@ -1012,14 +1025,15 @@ class FluxActionPolicy(nn.Module):
         """Observation batch -> ``(B, chunk_size, action_dim)`` absolute commands in the dataset's action units.
 
         Normalization is undone and, under ``joint_delta``, the predicted deltas are integrated onto the
-        observed state, so the result is what the dataset's action column holds (gripper as stored).
+        observed state (under ``joint_relative``, added to the measured state at request time), so the result
+        is what the dataset's action column holds (gripper as stored).
         """
         if kwargs:
             raise NotImplementedError("FLUX Action does not implement RTC inference arguments yet")
         if self.config.inference_profile == "history":
             batch = history.observation_window(batch, self.config)
             targets = self.predict_normalized_targets(batch)
-            return self.actions_from_targets(targets, batch["command_history"][:, -1])
+            return self.actions_from_targets(targets, self._action_reference(batch))
         targets = self.predict_normalized_targets(batch)
         return self.actions_from_targets(targets, self._state(batch))
 
@@ -1068,6 +1082,14 @@ class FluxActionPolicy(nn.Module):
             raise NotImplementedError("FLUX Action does not implement RTC inference arguments yet")
         if self.config.inference_profile == "history":
             window = self._observation_history.append(batch, self.config, self._last_command)
+            if self.config.action_parameterization == "joint_relative":
+                # The whole chunk is anchored at the request's measured state, not stepped from the last command.
+                if not self._action_queue:
+                    actions = self.predict_action_chunk(window)[:, : self.config.n_action_steps]
+                    self._action_queue.extend(actions.transpose(0, 1))
+                action = self._action_queue.popleft()
+                self._last_command = action.detach().clone()
+                return action
             if not self._action_queue:
                 targets = self.predict_normalized_targets(window)[:, : self.config.n_action_steps]
                 self._action_queue.extend(targets.transpose(0, 1))

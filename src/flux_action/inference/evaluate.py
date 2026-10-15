@@ -108,6 +108,8 @@ def evaluate_policy(
                 )
                 observation["command_history"] = batch["command_history"]
                 anchor = batch["command_history"][:, -1]
+            if policy.config.action_parameterization == "joint_relative":
+                anchor = policy._action_reference(observation)  # the measured state at request time
             predicted = policy.predict_normalized_targets(observation)  # (1, K, D)
             recorded = policy.training_targets(batch).to(predicted)
             actions = policy.actions_from_targets(predicted, anchor)
