@@ -337,6 +337,12 @@ class Trainer:
             raise FileNotFoundError(f"LeRobot training requires normalization statistics: {statistics_path}")
         statistics = lerobot_index.load_statistics(statistics_path)
         fields = dict(fields)
+        if fields.get("gripper_flip_dims", PolicyConfig.gripper_flip_dims):
+            # The index bounds describe the channels as recorded; the policy normalizes 1 - x on flipped dims,
+            # which those bounds would clip.
+            raise ValueError(
+                "LeRobot index statistics describe unflipped channels; set policy.gripper_flip_dims to []"
+            )
         indexed = statistics["action"]["parameterization"]
         absolute = tuple(statistics["action"]["absolute_dims"])
         parameterization = fields.setdefault("action_parameterization", indexed)

@@ -341,6 +341,9 @@ def test_trainer_runs_resumes_and_exports_with_the_index_bounds(v3, tmp_path):
 
 def test_trainer_refuses_a_policy_that_disagrees_with_the_index(v3, tmp_path):
     source, out, _ = v3
+    policy = {key: value for key, value in TINY_POLICY.items() if key != "gripper_flip_dims"}
+    with pytest.raises(ValueError, match="gripper_flip_dims"):
+        Trainer(make_config(source, out, tmp_path / "flip", policy=policy), policy_factory=tiny_policy).run()
     statistics = lerobot_index.load_statistics(out / "statistics.json")
     other = {"q01": [0.0] * DIM, "q99": [1.0] * DIM}
     with pytest.raises(ValueError, match="disagrees"):
