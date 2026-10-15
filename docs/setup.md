@@ -378,6 +378,26 @@ See [SO-101 camera mapping](so101-lora.md#so-101-camera-keys-and-tiling) for its
 `grid` supports custom layouts but requires training for that layout. Use the camera arrangement
 expected by your checkpoint.
 
+### Action parameterizations
+
+`action_parameterization` sets what the action tokens carry. Inference always returns absolute
+commands in dataset units. Channels in `absolute_action_dims`, typically grippers, stay absolute.
+
+| Mode | Targets | Suited to |
+|---|---|---|
+| `absolute` | Commands as recorded | The released DROID checkpoint; robots whose measured state lags or differs from commands |
+| `joint_delta` | Per-frame differences `a[t] - a[t-1]`, integrated at inference | Whole chunks executed open loop, as in the SO-101 recipe |
+| `joint_relative` | Commands minus the measured state at request time, one anchor per chunk | Frequent replanning on arms that track their commands closely |
+
+Index LeRobot data with the matching `--action-parameterization`, since the trainer requires the
+statistics and the policy to agree. When unsure, train short runs of two modes and compare them
+on the same evaluation seeds.
+
+End-effector action spaces are in progress. Until they land, end-effector poses can be converted
+in your own dataset code and trained as `absolute` actions. Feedback from users who tried this
+found that poses relative to the end-effector pose at the start of each chunk performed clearly
+better than absolute poses.
+
 ### Reference DROID inference settings
 
 The DROID root package saves these reference settings. The CLI and RoboLab server preserve
