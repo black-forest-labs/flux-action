@@ -816,3 +816,49 @@ def test_history_recipe_requires_matching_index_horizon(v3, tmp_path):
             make_config(source, out, tmp_path / "run", policy={**TINY_POLICY, "chunk_size": 42}),
             policy_factory=unexpected,
         ).build()
+
+
+def test_relative_statistics_cover_every_window_and_train(v3, tmp_path):
+    source, out, _ = v3
+    manifest = load_manifest(out / "manifest.json")
+    rows = np.load(out / "rows.f32.npy", mmap_mode="r")
+    statistics = lerobot_index.build_statistics(
+        manifest, rows, action_parameterization="joint_relative", absolute_action_dims=(-1,)
+    )
+    # reference: every allowed start s, a[s + k] - state[s] for k < 32, gripper absolute
+    targets = []
+    for episode in manifest["episodes"]:
+        e, n = episode["episode_index"], episode["n_frames"]
+        actions = np.array([action_row(e, i) for i in range(n)], np.float64)
+        states = np.array([state_row(e, i) for i in range(n)], np.float64)
+        for s in range(1, n - 32):
+            window = actions[s : s + 32] - states[s]
+            window[:, -1] = actions[s : s + 32, -1]
+            targets.append(window)
+    targets = np.concatenate(targets)
+    assert statistics["action"]["parameterization"] == "joint_relative"
+    assert statistics["action"]["absolute_dims"] == [DIM - 1]
+    assert statistics["action"]["q01"] == pytest.approx(
+        np.percentile(targets, 1, axis=0).tolist(), rel=1e-3, abs=1e-4
+    )
+    assert statistics["action"]["q99"] == pytest.approx(
+        np.percentile(targets, 99, axis=0).tolist(), rel=1e-3, abs=1e-4
+    )
+    # an index with relative statistics trains a joint_relative policy and records the same contract
+    relative_index = tmp_path / "index"
+    relative_index.mkdir()
+    for name in ("manifest.json", "rows.f32.npy"):
+        (relative_index / name).symlink_to(out / name)
+    lerobot_index.write_statistics(statistics, relative_index / "statistics.json")
+    policy = {**TINY_POLICY, "action_parameterization": "joint_relative"}
+    output = tmp_path / "run"
+    Trainer(
+        make_config(source, relative_index, output, policy=policy, steps=2), policy_factory=tiny_policy
+    ).run()
+    event = next(r for r in records(output) if r.get("event") == "normalization")
+    assert event["action_parameterization"] == "joint_relative" and event["absolute_action_dims"] == [DIM - 1]
+    saved = json.loads((output / "step-2" / "config.json").read_text())
+    assert saved["action_parameterization"] == "joint_relative"
+    assert saved["action_normalization"]["q99"] == pytest.approx(statistics["action"]["q99"])
+    with pytest.raises(ValueError, match="joint_relative"):
+        Trainer(make_config(source, relative_index, tmp_path / "delta"), policy_factory=tiny_policy).run()

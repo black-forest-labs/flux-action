@@ -349,9 +349,9 @@ class Trainer:
         if "absolute_action_dims" in fields:
             configured = lerobot_index.normalize_dims(fields["absolute_action_dims"], action_dim)
         else:
-            configured = absolute if indexed == "joint_delta" else ()
+            configured = absolute if indexed != "absolute" else ()
             fields["absolute_action_dims"] = list(configured)
-        if parameterization != indexed or (indexed == "joint_delta" and configured != absolute):
+        if parameterization != indexed or (indexed != "absolute" and configured != absolute):
             raise ValueError(
                 f"the index statistics describe {indexed!r} targets with absolute dims {list(absolute)}, the "
                 f"policy config {parameterization!r} with {list(configured)}; re-index with "
