@@ -28,7 +28,7 @@ from flux_action.models.text_encoder import MockTextEncoder
 from flux_action.models.transformer import JointSingleSeq, JointSingleSeqParams
 from flux_action.models.wiring import action_dit_params, restrict_content_streams, stream_of_key
 from flux_action.policy import FluxActionPolicy, _released_inference_config
-from flux_action.processing import packing
+from flux_action.processing import normalization, packing
 
 
 def report_prediction_drift(actual, expected):
@@ -504,3 +504,19 @@ def test_full_trunk_defaults_to_lean_construction_without_loading_unused_tensors
     assert policy.config.content_streams == LEAN_STREAMS
     assert not any(stream_of_key(key) in DROPPED_STREAMS for key in loaded)
     assert not any(stream_of_key(key) in DROPPED_STREAMS for key in policy.state_dict())
+
+
+def test_mean_std_normalization_is_a_z_score():
+    config = tiny_config(
+        action_normalization={"mean": [1.0] * 6, "std": [0.5] * 6},
+        state_normalization={"mean": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0], "std": [2.0] * 6},
+    )
+    assert config.action_normalization == {"q01": [0.5] * 6, "q99": [1.5] * 6}
+    x = torch.linspace(-1.0, 3.0, 6)[None]
+    normalized = normalization.normalize(x, config.action_normalization, config.normalization_clip)
+    torch.testing.assert_close(normalized, (x - 1.0) / 0.5)
+    torch.testing.assert_close(normalization.denormalize(normalized, config.action_normalization), x)
+    with pytest.raises(AssertionError, match="std must be positive"):
+        tiny_config(action_normalization={"mean": [0.0] * 6, "std": [0.0] * 6})
+    with pytest.raises(AssertionError, match="q01 and q99, or mean and std"):
+        tiny_config(action_normalization={"mean": [0.0] * 6, "q99": [1.0] * 6})

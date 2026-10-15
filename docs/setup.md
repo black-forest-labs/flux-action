@@ -390,7 +390,9 @@ commands in dataset units. Channels in `absolute_action_dims`, typically gripper
 | `joint_relative` | Commands minus the measured state at request time, one anchor per chunk | Frequent replanning on arms that track their commands closely |
 
 Index LeRobot data with the matching `--action-parameterization`, since the trainer requires the
-statistics and the policy to agree. When unsure, train short runs of two modes and compare them
+statistics and the policy to agree. To normalize with your own z-score statistics instead, set
+`action_normalization` or `state_normalization` to `{"mean": [...], "std": [...]}`; they are stored
+as range bounds `mean ± std`. When unsure, train short runs of two modes and compare them
 on the same evaluation seeds.
 
 End-effector action spaces are in progress. Until they land, end-effector poses can be converted

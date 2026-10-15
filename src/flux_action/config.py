@@ -73,6 +73,8 @@ class PolicyConfig:
     # where that is at most 1e-6. {"q01": [...], "q99": [...]} with action_dim entries each, or None for the
     # identity (DROID radians and closed fractions need none). ``flux-action index-lerobot`` computes them; the
     # trainer fills empty fields from the index and refuses bounds that disagree with it. Exports carry them.
+    # {"mean": [...], "std": [...]} is accepted too and stored as q01 = mean - std, q99 = mean + std, which
+    # makes x_norm = (x - mean) / std.
     action_normalization: dict[str, list[float]] | None = None
     state_normalization: dict[str, list[float]] | None = None
     normalization_clip: float = 6.0
@@ -235,7 +237,15 @@ class PolicyConfig:
             value = getattr(self, name)
             if value is None:
                 continue
-            assert set(value) == {"q01", "q99"}, "normalization requires q01 and q99"
+            if set(value) == {"mean", "std"}:
+                mean, std = (list(map(float, value[k])) for k in ("mean", "std"))
+                assert len(mean) == len(std), "normalization width mismatch"
+                assert all(sd > 0 for sd in std), "normalization std must be positive"
+                value = {
+                    "q01": [m - sd for m, sd in zip(mean, std, strict=True)],
+                    "q99": [m + sd for m, sd in zip(mean, std, strict=True)],
+                }
+            assert set(value) == {"q01", "q99"}, "normalization requires q01 and q99, or mean and std"
             q01, q99 = (list(map(float, value[k])) for k in ("q01", "q99"))
             assert len(q01) == len(q99) == self.action_dim, "normalization width mismatch"
             assert all(math.isfinite(x) for x in q01 + q99), "nonfinite normalization bound"
