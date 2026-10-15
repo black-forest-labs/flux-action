@@ -125,9 +125,10 @@ class TrainConfig:
     eps: float = 1e-8
     weight_decay: float = 0.05
     fused_optimizer: bool = True
-    # Global gradient-norm clipping (torch.nn.utils.clip_grad_norm_ semantics, over all ranks). None = off,
-    # the DROID recipe; the SO-101 recipe clips at 1.0. The logged grad_norm is the norm before clipping.
-    max_grad_norm: float | None = None
+    # Global gradient-norm clipping (torch.nn.utils.clip_grad_norm_ semantics, over all ranks). On by default:
+    # full fine-tunes of new embodiments can diverge without it. None = off, as the DROID recipe pins it.
+    # The logged grad_norm is the norm before clipping.
+    max_grad_norm: float | None = 1.0
     # Windows drawn per episode per epoch. One (DROID) means an epoch is one window per episode, so a small
     # dataset cannot fill an update: ranks x num_workers x windows_per_rank x grad_accumulation windows are
     # needed per epoch. The SO-101 corpus builder took up to 35 windows per episode; several visits draw
