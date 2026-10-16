@@ -67,6 +67,41 @@ def test_grid_policy_takes_mixed_resolutions_and_names_missing_cameras():
     assert single.config.camera_layout == "single"
 
 
+def test_droid_and_side_by_side_resize_other_camera_resolutions():
+    droid = make_policy(
+        tiny_config(
+            camera_layout="droid", camera_keys=("images.w", "images.l", "images.r"), canvas_hw=(544, 736)
+        )
+    )
+    frames = {key: torch.rand(1, 3, 480, 640) for key in ("images.w", "images.l", "images.r")}
+    cams = droid._cameras(frames)
+    assert cams.shape == (1, 3, 1, 3, 360, 640)
+    torch.testing.assert_close(cams[:, 0], droid._resize_camera(frames["images.w"][:, None], (360, 640)))
+    native = {key: torch.rand(1, 3, 360, 640) for key in frames}
+    assert torch.equal(
+        droid._cameras(native)[:, 1, 0], native["images.l"]
+    )  # the native size passes untouched
+    config = tiny_config(
+        camera_layout="side_by_side",
+        camera_keys=("images.top", "images.wrist"),
+        canvas_hw=(64, 128),
+        augment=True,
+    )
+    policy = make_policy(config).train()
+    batch = {
+        "images.top": torch.rand(1, 33, 3, 48, 64),
+        "images.wrist": torch.rand(1, 33, 3, 24, 40),
+        "state": torch.rand(1, 6),
+        "action": torch.rand(1, 32, 6),
+        "task": ["move"],
+    }
+    assert policy._cameras(batch).shape == (1, 2, 33, 3, 48, 64)
+    prepared = policy.prepare(batch)  # one augmentation draw over cameras of different source resolutions
+    assert torch.isfinite(prepared.latents).all()
+    with pytest.raises(AssertionError, match="incompatible camera shapes"):
+        policy._cameras({**batch, "images.wrist": torch.rand(1, 32, 3, 24, 40)})
+
+
 def test_frozen_components_are_unregistered_and_follow_moves():
     policy = make_policy()
     assert policy.frozen.video_vae is policy.video_vae and policy.frozen.text_encoder is policy.text_encoder

@@ -413,14 +413,15 @@ class FluxActionPolicy(nn.Module):
             assert (img.is_floating_point() or img.dtype == torch.uint8) and img.shape[2] == 3, (
                 "invalid camera tensor"
             )
-            assert layout != "droid" or tuple(img.shape[-2:]) == (360, 640), "invalid DROID frame"
             cams.append(img)
-        if len({tuple(c.shape) for c in cams}) != 1:
-            same_btc = len({tuple(c.shape[:3]) for c in cams}) == 1
-            assert layout == "grid" and same_btc, "incompatible camera shapes"
-            # the grid layout takes mixed resolutions: every camera is resized to the largest one first
+        assert len({tuple(c.shape[:3]) for c in cams}) == 1, "incompatible camera shapes"
+        if layout == "droid":
+            # The DROID canvas places 360x640 cameras; other resolutions are resized to that first.
+            hw = packing.CAMERA_HW
+        else:
+            # Mixed resolutions: every camera is resized to the largest one, so one augmentation draw fits all.
             hw = (max(c.shape[-2] for c in cams), max(c.shape[-1] for c in cams))
-            cams = [self._resize_camera(c, hw) for c in cams]
+        cams = [c if tuple(c.shape[-2:]) == hw else self._resize_camera(c, hw) for c in cams]
         return torch.stack(cams, dim=1)
 
     @staticmethod

@@ -376,7 +376,9 @@ do not pre-tile them for the Python API.
 
 See [SO-101 camera mapping](so101-lora.md#so-101-camera-keys-and-tiling) for its physical roles.
 `grid` supports custom layouts but requires training for that layout. Use the camera arrangement
-expected by your checkpoint.
+expected by your checkpoint. Cameras may differ in resolution: `droid` resizes every camera to
+360 × 640, the other layouts resize to the largest camera before composing. Pass cameras as separate
+streams rather than a pre-composed image, so training augmentation and camera dropout apply per camera.
 
 ### Action parameterizations
 
