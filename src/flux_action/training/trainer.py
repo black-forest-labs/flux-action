@@ -59,6 +59,7 @@ from .checkpoint import (
     resume_seed,
     save_checkpoint,
     seed_everything,
+    slim_checkpoints,
 )
 from .data import DataPosition, WindowDataset, build_dataloader, load_manifest, manifest_dims
 from .distributed import (
@@ -142,6 +143,9 @@ class TrainConfig:
     # step (None keeps everything, as the source run did). A checkpoint is 4x the fp32 model size.
     keep_checkpoints: int | None = None
     keep_every: int | None = 5000
+    # With keep_checkpoints set, checkpoints older than the newest keep_checkpoints also drop their optimizer
+    # state (half their size): they still export and evaluate, but only the newest ones resume.
+    slim_kept_checkpoints: bool = True
     log_every: int = 10
     resume: str = "auto"  # auto | none | path of a step directory
     # A resumed run must keep windows_per_rank x ranks x grad_accumulation unless explicitly allowed.
@@ -747,6 +751,12 @@ class Trainer:
                 )
                 if removed:
                     self._log_line({"event": "prune", "removed_steps": removed})
+                if self.config.slim_kept_checkpoints:
+                    slimmed = slim_checkpoints(
+                        self.output_dir, keep_last=self.config.keep_checkpoints, protect=self.step
+                    )
+                    if slimmed:
+                        self._log_line({"event": "slim", "slimmed_steps": slimmed})
 
     def _log_line(self, record: dict[str, Any]) -> None:
         if self.rank != 0:
