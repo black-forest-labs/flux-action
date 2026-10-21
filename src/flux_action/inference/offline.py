@@ -94,19 +94,21 @@ def run_inference(
         compile_dit=compile_dit,
         offload_text_encoder=offload_text_encoder,
     )
+    if device.type in ("cuda", "xpu"):
+        getattr(torch, device.type).synchronize(device)
     if device.type == "cuda":
-        torch.cuda.synchronize(device)
         memory["peak_during_load"] = torch.cuda.max_memory_allocated(device)
         memory["allocated_after_load"] = torch.cuda.memory_allocated(device)
         torch.cuda.reset_peak_memory_stats(device)
     batch = load_observation(observation, policy.config, task, device)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    if device.type in ("cuda", "xpu"):
+        getattr(torch, device.type).synchronize(device)
     started = time.perf_counter()
     with torch.inference_mode():
         actions = policy.predict_action_chunk(batch)
+    if device.type in ("cuda", "xpu"):
+        getattr(torch, device.type).synchronize(device)
     if device.type == "cuda":
-        torch.cuda.synchronize(device)
         memory["peak_during_chunk"] = torch.cuda.max_memory_allocated(device)
     elapsed = time.perf_counter() - started
     expected = (1, policy.config.chunk_size, policy.config.action_dim)

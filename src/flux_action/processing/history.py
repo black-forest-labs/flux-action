@@ -90,7 +90,11 @@ def pack_conditioning(vae, cameras: Tensor, states: Tensor, commands: Tensor, co
     )
     indices = snapshot_indices(config)
     tokens, positions = [], []
-    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=states.device.type == "cuda"):
+    with torch.autocast(
+        states.device.type,
+        dtype=torch.bfloat16,
+        enabled=states.device.type in ("cuda", "xpu"),
+    ):
         for index in indices:
             latent = packing.encode_single_frame(vae, canvas[:, index], config.latent_hw, single_frame=True)
             token, ids = batched_prc_vid(

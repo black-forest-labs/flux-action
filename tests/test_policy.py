@@ -16,6 +16,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,7 +25,9 @@ from safetensors.torch import load_file, save_file
 
 import flux_action
 from flux_action.config import CONTENT_STREAMS, DROID_INFERENCE_SETTINGS, PolicyConfig
+from flux_action.inference.precision import prepare_for_serving
 from flux_action.models.text_encoder import MockTextEncoder
+from flux_action.models.transformer_inf_bf16 import BF16InferenceDiT
 from flux_action.models.transformer import JointSingleSeq, JointSingleSeqParams
 from flux_action.models.wiring import action_dit_params, restrict_content_streams, stream_of_key
 from flux_action.policy import FluxActionPolicy, _released_inference_config
@@ -35,6 +38,30 @@ def report_prediction_drift(actual, expected):
     assert actual.shape == expected.shape, "prediction shape mismatch"
     assert torch.isfinite(actual).all() and torch.isfinite(expected).all(), "nonfinite prediction"
     print(f"prediction max_abs={(actual.float() - expected.float()).abs().max().item():.9g}")
+
+
+def test_serving_prepares_bf16_policy_on_xpu():
+    calls = []
+    policy = SimpleNamespace(
+        device=torch.device("xpu"),
+        prepare_inference=lambda *, compile: calls.append(compile) or True,
+    )
+
+    report = prepare_for_serving(policy, compile_dit=True)
+
+    assert calls == [True]
+    assert report["prepared"] is True
+
+
+def test_bf16_inference_validator_accepts_xpu_weights(monkeypatch):
+    dit = BF16InferenceDiT.__new__(BF16InferenceDiT)
+    monkeypatch.setattr(
+        BF16InferenceDiT,
+        "_weight_spec",
+        lambda self: (torch.device("xpu"), torch.bfloat16),
+    )
+
+    dit.validate_runtime_device()
 
 
 def test_train_export_reload_predict_and_queue(batch, tmp_path):
