@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare a policy for the released CUDA inference path."""
+"""Prepare a policy for the released accelerator inference path."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def prepare_for_serving(
         policy.to(device)
 
     prepared = False
-    if policy.device.type == "cuda":
+    if policy.device.type in ("cuda", "xpu"):
         prepared = policy.prepare_inference(compile=compile_dit)
     assert prepared or not compile_dit, "acceleration unavailable"
 
@@ -52,8 +52,8 @@ def prepare_for_serving(
         for _ in range(warmup):
             started = time.perf_counter()
             warmup_fn()
-            if policy.device.type == "cuda":
-                torch.cuda.synchronize(policy.device)
+            if policy.device.type in ("cuda", "xpu"):
+                getattr(torch, policy.device.type).synchronize(policy.device)
             times.append(time.perf_counter() - started)
         report["warmup_seconds"] = times
     return report

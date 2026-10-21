@@ -72,6 +72,51 @@ def _natten_attention_kwargs(
     return kwargs
 
 
+def _neighbor_index(length: int, kernel: int, causal: bool, device: torch.device) -> tuple[Tensor, Tensor]:
+    """Key indices ``(length, kernel)`` and validity per query along one axis (NATTEN, stride/dilation 1)."""
+    kernel = min(kernel, length)
+    query = torch.arange(length, device=device)[:, None]
+    offset = torch.arange(kernel, device=device)[None]
+    if causal:
+        index = query - (kernel - 1) + offset
+        return index.clamp(min=0), index >= 0
+    left = kernel // 2
+    center = query.clamp(left, length - 1 - (kernel // 2 + kernel % 2 - 1))
+    index = center - left + offset
+    return index, torch.ones_like(index, dtype=torch.bool)
+
+
+def _torch_neighborhood_attention(
+    q: Tensor, k: Tensor, v: Tensor, kernel_size: list[int], is_causal: list[bool] | None = None
+) -> Tensor:
+    """NATTEN ``na2d``/``na3d`` for ``(B, *spatial, heads, head_dim)`` on devices without NATTEN kernels."""
+    spatial = q.shape[1:-2]
+    causal = is_causal or [False] * len(spatial)
+    ndim = len(spatial)
+    index = torch.zeros((), dtype=torch.long, device=q.device)
+    valid = torch.ones((), dtype=torch.bool, device=q.device)
+    for axis, (length, kernel, axis_causal) in enumerate(zip(spatial, kernel_size, causal, strict=True)):
+        axis_index, axis_valid = _neighbor_index(length, kernel, axis_causal, q.device)
+        shape = [1] * (2 * ndim)
+        shape[axis], shape[ndim + axis] = axis_index.shape
+        index = index + axis_index.view(shape) * math.prod(spatial[axis + 1 :])
+        valid = valid & axis_valid.view(shape)
+    n = math.prod(spatial)
+    index, valid = index.reshape(n, -1), valid.reshape(n, -1)
+    b, heads, dim = q.shape[0], q.shape[-2], q.shape[-1]
+    qf, kf, vf = (x.reshape(b, n, heads, dim) for x in (q, k, v))
+    out = torch.empty_like(qf)
+    rows = max(1, 2**26 // (index.shape[1] * heads * dim))
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        for start in range(0, n, rows):
+            idx, ok = index[start : start + rows], valid[start : start + rows]
+            logits = torch.einsum("brhd,brkhd->brhk", qf[:, start : start + rows].float(), kf[:, idx].float())
+            logits = logits.mul_(dim**-0.5).masked_fill_(~ok[None, :, None], float("-inf"))
+            weights = logits.softmax(dim=-1)
+            out[:, start : start + rows] = torch.einsum("brhk,brkhd->brhd", weights, vf[:, idx].float()).to(q.dtype)
+    return out.reshape(q.shape)
+
+
 @dataclass
 class ViTNormInferenceParams:
     z_dim: int = 96
@@ -331,6 +376,11 @@ class Natten3D(nn.Module):
 
     def _attend(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         """Neighborhood attention over ``(B, T, H, W, heads, head_dim)``; a single frame uses the 2-D kernel."""
+        if q.device.type != "cuda":
+            if q.shape[1] == 1:
+                return _torch_neighborhood_attention(q[:, 0], k[:, 0], v[:, 0], self.window_size[1:])[:, None]
+            causal = [self.causal, False, False]
+            return _torch_neighborhood_attention(q, k, v, self.window_size, causal)
         if q.shape[1] == 1:
             q2, k2, v2 = q.squeeze(1), k.squeeze(1), v.squeeze(1)
             kernel = self.window_size[1:]
