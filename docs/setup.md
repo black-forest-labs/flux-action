@@ -4,17 +4,18 @@ Install once for standalone inference and full fine-tuning. The first prediction
 released DROID checkpoint and a recorded observation; no robot is required.
 For SO-101 task LoRA, use the [LeRobot workflow](so101-lora.md) and its separate environment.
 
-Inference and training require Linux and an NVIDIA GPU. Data preparation and tests also run on CPU.
+Inference supports NVIDIA CUDA and Intel XPU on Linux. Training requires an NVIDIA GPU;
+data preparation and tests also run on CPU.
 
 ## Requirements
 
 | Component | Example environment |
 |---|---|
-| GPU / driver | NVIDIA H200, CUDA 12.8 |
+| GPU / driver | NVIDIA H200 with CUDA 12.8, or an Intel GPU with a supported XPU driver |
 | Python | 3.12 |
-| torch / torchvision | 2.10.0+cu128 / 0.25.0+cu128 |
+| torch / torchvision | CUDA: 2.10.0+cu128 / 0.25.0+cu128; XPU: install matching wheels from the PyTorch XPU index |
 | transformers | 5.16.1 |
-| NATTEN | 0.21.6 (`+torch2100cu128` wheel) |
+| NATTEN | CUDA: 0.21.6 (`+torch2100cu128` wheel); not required for XPU |
 
 Match the NATTEN wheel to your architecture, torch and CUDA versions. Install FFmpeg with an AV1
 decoder for the recorded-data example and training; check that `ffmpeg -version` runs.
@@ -43,6 +44,34 @@ uv pip install --python .venv/bin/python 'natten==0.21.6+torch2100cu128' -f http
 
 If you run `uv sync` again, reinstall NATTEN afterwards: it is installed separately from the lockfile.
 Run the commands below from the repository root. Keep generated files under ignored `outputs/`.
+
+### Intel XPU inference
+
+Install a supported Intel GPU driver first. Use these commands instead of the standard Linux install
+above; the project lockfile selects CUDA PyTorch by default, so skip those packages and install the
+XPU wheels explicitly:
+
+```sh
+uv sync --locked --extra encoders --extra data \
+  --no-install-package torch --no-install-package torchvision
+uv pip install --python .venv/bin/python \
+  --index-url https://download.pytorch.org/whl/xpu torch torchvision
+```
+
+XPU uses the built-in PyTorch neighborhood-attention implementation, so no NATTEN wheel is needed.
+Check that PyTorch can see the device, then run inference with `--device xpu`:
+
+```sh
+uv run --no-sync python -c 'import torch; assert torch.xpu.is_available(); print(torch.xpu.get_device_name(0))'
+uv run --no-sync flux-action infer --checkpoint outputs/droid \
+  --observation outputs/public-droid/observation.npz --task "$task_caption" \
+  --output outputs/droid/xpu-inference --device xpu
+```
+
+Use `uv run --no-sync` while this environment contains XPU wheels; a normal `uv run` syncs the
+CUDA wheels from the project lockfile. XPU support is limited to BF16 inference. Training and FP8r
+inference remain CUDA-only. For RoboLab serving, pass `--device xpu` and start eagerly with
+`--no-compile-dit`.
 
 ## Choose a checkpoint
 

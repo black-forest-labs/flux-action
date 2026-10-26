@@ -447,7 +447,7 @@ class BF16InferenceDiT(nn.Module):
 
     def validate_runtime_device(self) -> None:
         device, _ = self._weight_spec()
-        assert device.type == "cuda", "prepare after CUDA placement"
+        assert device.type in ("cuda", "xpu"), "prepare after accelerator placement"
 
     def _embed_timestep(self, timestep: Tensor) -> Tensor:
         with torch.autocast(device_type=timestep.device.type, enabled=False):

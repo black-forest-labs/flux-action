@@ -270,7 +270,7 @@ class FluxActionPolicy(nn.Module):
         # Older packages explicitly disable this; serving encodes only the observed frame.
         self.config.single_frame_encode = True
         if isinstance(self.dit, JointSingleSeq):
-            if not _released_inference_config(self.config) or self.device.type != "cuda":
+            if not _released_inference_config(self.config) or self.device.type not in ("cuda", "xpu"):
                 return False
             from .models.transformer_inf_bf16 import BF16InferenceDiT
 
@@ -522,8 +522,8 @@ class FluxActionPolicy(nn.Module):
             finally:
                 if self._offload_text_encoder:
                     encoder.to("cpu")
-                    if device.type == "cuda":
-                        torch.cuda.empty_cache()
+                    if device.type in ("cuda", "xpu"):
+                        getattr(torch, device.type).empty_cache()
             for caption, ctx in zip(todo, encoded, strict=True):
                 self._ctx_cache[keys[caption]] = (
                     ctx.to(self.dtype_),
@@ -741,7 +741,9 @@ class FluxActionPolicy(nn.Module):
                     for i in idx[start : start + cfg.vae_batch_windows]
                 ]
             )  # (nb, 3, T, Hc, Wc)
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            with torch.autocast(
+                device.type, dtype=torch.bfloat16, enabled=device.type in ("cuda", "xpu")
+            ):
                 latents.append(
                     history.encode_windows(self.video_vae, videos, cfg)
                     if cfg.inference_profile == "history"
@@ -964,7 +966,7 @@ class FluxActionPolicy(nn.Module):
         """Observation batch -> ``(B, chunk_size, action_dim)`` predicted targets in the trained action space:
         normalized, deltas under ``joint_delta``, before denormalization and integration."""
         self.config.validate_inference()
-        if self._inference_prepared and self.dit._compiled_hot is not None:
+        if self._inference_prepared and self.dit._compiled_hot is not None and self.device.type == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
         if self.training:
             # Prediction enters eval once; validation callers may resume training.
@@ -1038,7 +1040,7 @@ class FluxActionPolicy(nn.Module):
         cfg = self.config
         assert cfg.camera_layout == "droid", "composite inference requires DROID layout"
         self.config.validate_inference()
-        if self._inference_prepared and self.dit._compiled_hot is not None:
+        if self._inference_prepared and self.dit._compiled_hot is not None and self.device.type == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
         if self.training:
             # Prediction enters eval once; validation callers may resume training.
