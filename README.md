@@ -41,3 +41,6 @@ See [checkpoint selection](docs/setup.md#choose-a-checkpoint) for commands.
 | [DROID full fine-tuning](docs/droid-finetune.md) | Prepare DROID data, run the reproduction recipe, resume and export |
 | [SO-101 LoRA](docs/so101-lora.md) | Adapt the prepared SO-101 checkpoint to your task with LeRobot |
 | [Custom tasks and embodiments](docs/embodiments.md) | Define your own observations and actions, using games as a worked example |
+
+Intel XPU is supported for BF16 inference on Linux. Training and FP8r inference remain CUDA-only;
+see the [Intel XPU setup and usage notes](docs/setup.md#intel-xpu-inference).

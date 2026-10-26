@@ -23,7 +23,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
-from natten.functional import na2d, na3d
 from torch import Tensor
 
 logger = logging.getLogger(__name__)
@@ -384,9 +383,13 @@ class Natten3D(nn.Module):
         if q.shape[1] == 1:
             q2, k2, v2 = q.squeeze(1), k.squeeze(1), v.squeeze(1)
             kernel = self.window_size[1:]
+            from natten.functional import na2d
+
             kwargs = _natten_attention_kwargs(q2, k2, v2, kernel_size=kernel)
             return na2d(q2, k2, v2, kernel_size=kernel, attention_kwargs=kwargs).unsqueeze(1)
         causal = [self.causal, False, False]
+        from natten.functional import na3d
+
         kwargs = _natten_attention_kwargs(q, k, v, kernel_size=self.window_size, is_causal=causal)
         return na3d(q, k, v, is_causal=causal, kernel_size=self.window_size, attention_kwargs=kwargs)
 
