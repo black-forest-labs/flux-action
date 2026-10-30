@@ -31,11 +31,14 @@ See the shared setup guide for [checkpoint formats](setup.md#choose-a-checkpoint
 
 The prepared model package contains the pre/postprocessor JSONs and quantile safetensors
 for task LoRA; these statistics stay fixed during training. No separate statistics file is needed.
-They are a choice for this adaptation workflow, not universal SO-101 calibration
-values: the upstream full-finetune used per-dataset normalization; see the
-[historical dataset bounds](../configs/so101/community_corpus.json). Use consistent
-joint order/units/calibration. If adapting with a different normalization, choose it
-before training and keep it for that adapter's inference and resume.
+They fit arms calibrated with current LeRobot and read with `use_degrees=True` (the default):
+they are the median statistics of the training datasets recorded with that calibration. The
+upstream full-finetune normalized each dataset separately; see the
+[historical dataset bounds](../configs/so101/community_corpus.json). Keep joint order, units and
+calibration the same for recording, training and inference. Record task datasets with current
+LeRobot and `use_degrees=True`; datasets recorded in the earlier -100 to 100 range mode or with the
+2024 calibration do not match these statistics. If adapting with a different normalization, choose
+it before training and keep it for that adapter's inference and resume.
 
 ## SO-101 camera keys and tiling
 
@@ -113,7 +116,7 @@ Download the policy package and shared encoders:
 ```sh
 hf auth login
 hf download black-forest-labs/flux-3-action-so101 \
-  --revision c9e13b2aca6a0a472b3ea03fd90cff32d3e85849 \
+  --revision e2584b2698e3b88368854976e354af87ec9893c6 \
   --local-dir models/flux-3-action-so101
 hf download black-forest-labs/flux-3-action-base \
   --revision 62878e2925e59b7a89ec14463ce89932624c490d \
