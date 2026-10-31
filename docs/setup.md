@@ -173,10 +173,13 @@ The NPZ contains `images.scene` and `images.wrist` as HWC uint8 RGB arrays, plus
 `state` as six float32 values in the delivered joint order: shoulder pan,
 shoulder lift, elbow flex, wrist flex, wrist roll, gripper. Arm joints use degrees;
 the gripper uses percentage points. This checkpoint predicts `(1, 42, 6)` absolute
-commands in those units, with no simulator-specific clipping.
+commands in those units, with no simulator-specific clipping. The package's normalization
+statistics fit arms calibrated with current LeRobot and read with `use_degrees=True` (the
+default). The checkpoint is a base for task adaptation rather than a zero-shot policy for new
+setups; train a LoRA on your task for useful behavior.
 
-Without a robot, take the observation from a recorded SO-101 LeRobot dataset. Index it with the
-checkpoint's stream names (`scene`, `wrist`) as in the
+Without a robot, take the observation from a recorded SO-101 LeRobot dataset in current
+calibration and degrees. Index it with the checkpoint's stream names (`scene`, `wrist`) as in the
 [SO-101 full fine-tuning section](so101-lora.md#optional-full-fine-tuning), then pick one frame:
 
 ```sh
