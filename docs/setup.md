@@ -405,6 +405,21 @@ in your own dataset code and trained as `absolute` actions. Feedback from users 
 found that poses relative to the end-effector pose at the start of each chunk performed clearly
 better than absolute poses.
 
+### Real-time chunking
+
+With real-time chunking, the robot keeps executing the current chunk while the next one is
+predicted, and the new chunk must start with the commands that will run during that prediction.
+Train with `rtc_max_prefix` (for example 15): each training window then treats its first 0 to
+`rtc_max_prefix` commands as already known. At inference, pass the commands already sent:
+
+```python
+chunk = policy.predict_action_chunk(observation, committed_actions=committed)  # (B, P, action_dim)
+```
+
+The first `P` commands come back unchanged and the rest continue them, at no extra cost per
+step. This works with `absolute` and `joint_relative` actions and only on checkpoints trained
+with `rtc_max_prefix > 0`; the default 0 trains and predicts exactly as before.
+
 ### Reference DROID inference settings
 
 The DROID root package saves these reference settings. The CLI and RoboLab server preserve

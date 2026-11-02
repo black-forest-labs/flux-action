@@ -68,6 +68,12 @@ class PolicyConfig:
     # absolute_action_dims; inference adds the predicted targets back onto that one state, without integration.
     action_parameterization: str = "absolute"
     absolute_action_dims: tuple[int, ...] = ()
+    # Committed-prefix training for real-time chunking (RTC). Each training window draws a prefix length P
+    # uniformly from [0, rtc_max_prefix]; its first P action tokens carry the clean targets at timestep 0 and
+    # get no loss. Inference can then pin up to rtc_max_prefix commands that are already sent to the robot
+    # (``committed_actions``) and predict a chunk that continues them. 0 = off. Not for joint_delta, whose
+    # targets chain from one frame to the next.
+    rtc_max_prefix: int = 0
     # Range normalization of the action targets and of the state token, per channel:
     # x_norm = clip(2 (x - q01) / span - 1, -normalization_clip, normalization_clip) with span = q99 - q01, or 1
     # where that is at most 1e-6. {"q01": [...], "q99": [...]} with action_dim entries each, or None for the
@@ -210,6 +216,10 @@ class PolicyConfig:
             "invalid chunk size"
         )
         assert 1 <= self.n_action_steps <= self.chunk_size, "invalid action step count"
+        if not isinstance(self.rtc_max_prefix, int) or not 0 <= self.rtc_max_prefix < self.chunk_size:
+            raise ValueError("rtc_max_prefix must be an integer in [0, chunk_size)")
+        if self.rtc_max_prefix and self.action_parameterization == "joint_delta":
+            raise ValueError("RTC prefixes require absolute or joint_relative actions")
         assert all(math.isfinite(x) and x > 0 for x in (self.fps, self.action_scale)), "invalid action timing"
         assert all(-self.action_dim <= d < self.action_dim for d in self.gripper_flip_dims), (
             "invalid gripper dimension"

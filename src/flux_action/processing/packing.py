@@ -435,13 +435,15 @@ def build_forward_kwargs(
     *,
     action_timesteps: Tensor | None = None,
     conditioning_noise_max: float = 0.0,
+    action_prefix_lengths: Tensor | None = None,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor]]:
     """Assemble one training call: ``(forward_kwargs, flow_targets, clean_latents)``.
 
     Conditioning streams (``x_video_cond``, ``x_<modality>_cond``) stay clean at timestep 0. Predicted
     streams use ``t`` and optionally separate ``action_timesteps``, rounded to their latent dtype.
     Optional conditioning noise applies only to visual snapshots; state/command history stays clean.
-    The timesteps handed to the model are fp32 tensors holding the rounded values.
+    The timesteps handed to the model are fp32 tensors holding the rounded values. ``action_prefix_lengths``
+    ``(B,)`` (RTC) keeps the first ``P`` action tokens of each window clean at timestep 0.
     """
     ak = f"x_{modality}"
     xv, tv = add_noise(video["x_video"], t, generator)
@@ -470,6 +472,10 @@ def build_forward_kwargs(
         kw["x_video_cond"], _ = add_noise(video["x_video_cond"], cond_t, generator)
         cond_tt = cond_t.to(device=dev, dtype=kw["x_video_cond"].dtype).float()
         kw["x_video_cond_timesteps"] = cond_tt[:, None].expand(video["x_video_cond"].shape[:2])
+    if action_prefix_lengths is not None:
+        prefix = torch.arange(xa.shape[1], device=dev)[None] < action_prefix_lengths.to(dev)[:, None]
+        kw[ak] = torch.where(prefix[..., None], action[ak].to(dev), xa)
+        kw[f"{ak}_timesteps"] = kw[f"{ak}_timesteps"].masked_fill(prefix, 0.0)
     targets = {"x_video": tv, ak: ta}
     clean = {"x_video": video["x_video"], ak: action[ak]}
     return kw, targets, clean
@@ -526,6 +532,7 @@ def flow_loss(
     action_mask: Tensor | None = None,
     reduction: str = "joint_tokens",
     channel_weights: list[float] | None = None,
+    action_token_mask: Tensor | None = None,
 ) -> dict[str, Tensor]:
     """Joint-token mean (DROID) or weighted per-modality means (history), with optional channel weights.
 
@@ -538,6 +545,9 @@ def flow_loss(
     ``action_mask`` ``(n, D)`` (1 = trained dim) restricts the per-token action MSE to the given dims of each
     window, for a head shared by embodiments of different action widths (padded dims carry no loss). The
     action tokens are laid out window-major in the packed sequence, ``n`` windows x ``K`` tokens each.
+
+    ``action_token_mask`` ``(n, K)`` (1 = trained token) drops RTC prefix tokens from the action loss; each
+    window's remaining tokens are reweighted so a window weighs the same whatever its prefix length.
     """
     ak = f"x_{modality}"
     video = ((pred["x_video"].float() - targets["x_video"].float()) ** 2).mean(-1)  # (B, Nv)
@@ -561,6 +571,12 @@ def flow_loss(
             if action_mask is None
             else (sq * weights * m).sum(-1) / m.sum(-1).clamp_min(1.0)
         )
+    if action_token_mask is not None:
+        token_mask = action_token_mask.to(device=sq.device, dtype=torch.float32)
+        counts = token_mask.sum(-1, keepdim=True).clamp_min(1)
+        token_weights = (token_mask * (token_mask.shape[-1] / counts)).reshape_as(action)
+        action = action * token_weights
+        weighted_action = weighted_action * token_weights
     if reduction == "modalities":
         total = video_weight * video.mean() + action_weight * weighted_action.mean()
     elif reduction == "joint_tokens":

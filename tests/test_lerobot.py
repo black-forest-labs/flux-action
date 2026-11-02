@@ -215,7 +215,7 @@ def test_policy_normalizes_deltas_and_integrates_back(v3):
     }
     policy.eval()
     known = torch.linspace(-0.5, 0.5, 32 * DIM).reshape(32, DIM)
-    policy._sample = lambda cond, caption, seed: known.clone()  # noqa: E731  (the DiT is not under test)
+    policy._sample = lambda cond, caption, seed, prefix=None: known.clone()  # noqa: E731  (the DiT is not under test)
     predicted = policy.predict_action_chunk(observation)
     denormalized = (known.double() + 1) * torch.from_numpy(span) / 2 + torch.from_numpy(q01)
     for i in range(2):
