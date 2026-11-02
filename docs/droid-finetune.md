@@ -76,11 +76,10 @@ The reference selected step 26,000 with power EMA sigma_rel 0.10. This is a refe
 not a guarantee that the same step is best for a new run. Inference settings are specified
 [separately](setup.md#reference-droid-inference-settings).
 
-The current recipe names its fresh heads `action_prediction_droid` so BF16 exports can
-use prepared inference after applying the DROID sampler preset. The pinned base has no
+The current recipe names its fresh heads `action_prediction_droid`. The pinned base has no
 DROID heads, so this retains fresh input/output-head initialization. Existing runs using
-`action` must keep that namespace when resuming (`--override policy.action_modality=action`)
-and use `--no-compile-dit` when serving their exports. Do not rename saved configurations.
+`action` must keep that namespace when resuming (`--override policy.action_modality=action`);
+their BF16 exports also use prepared inference. Do not rename saved configurations.
 
 ## Training speed
 
