@@ -363,7 +363,7 @@ predicted offset to the measured state at request time. `select_action` queues `
 commands before replanning and continues joint deltas from the last returned command; a
 joint-relative chunk is anchored at the state measured when it was requested.
 Call `reset` at episode boundaries, interventions or task/batch changes. The application owns
-control timing and execution; RTC arguments are unsupported.
+control timing and execution; for real-time chunking see [Real-time chunking](#real-time-chunking).
 
 ### Camera layouts
 
@@ -404,6 +404,26 @@ End-effector action spaces are in progress. Until they land, end-effector poses 
 in your own dataset code and trained as `absolute` actions. Feedback from users who tried this
 found that poses relative to the end-effector pose at the start of each chunk performed clearly
 better than absolute poses.
+
+### Real-time chunking
+
+Real-time chunking lets the robot keep moving while the next chunk is predicted. Train with
+`rtc_max_prefix` (for example 15), then pass the commands that will run during the prediction:
+
+```python
+chunk = policy.predict_action_chunk(observation, committed_actions=committed)  # (B, P, action_dim)
+```
+
+The first `P` commands come back unchanged and the rest continue smoothly from them. This works
+with `absolute` and `joint_relative` actions, on the reference path only: do not call
+`prepare_inference()`. In a control loop, start the next prediction in a background thread when `P`
+commands of the current chunk remain, pass those commands as `committed_actions`, and once they
+have been sent continue with `chunk[:, P:]`. `select_action` does the same with `rtc_overlap`, but
+the robot waits while it predicts.
+
+`P` must cover latency × control rate: 250 ms at 30 Hz is 8 commands, so use about 10. Measure the
+slowest prediction on the robot computer. With compilation and distillation we measured about
+140 ms on an RTX 5090; contact us if you need an optimized deployment checkpoint.
 
 ### Reference DROID inference settings
 

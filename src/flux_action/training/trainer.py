@@ -418,6 +418,7 @@ class Trainer:
             "action_scale",
             "gripper_flip_dims",
             "action_parameterization",
+            "rtc_max_prefix",
             "absolute_action_dims",
             "action_normalization",
             "state_normalization",
