@@ -358,8 +358,10 @@ Exports contain the DiT and configuration with verified checksums; frozen encode
 external references and are not checksummed. They contain no training state.
 
 `predict_action_chunk` produces absolute commands in dataset units. For joint-delta policies,
-it integrates predicted deltas onto measured state. `select_action` queues `n_action_steps`
-commands before replanning and continues joint deltas from the last returned command.
+it integrates predicted deltas onto measured state; for joint-relative policies, it adds every
+predicted offset to the measured state at request time. `select_action` queues `n_action_steps`
+commands before replanning and continues joint deltas from the last returned command; a
+joint-relative chunk is anchored at the state measured when it was requested.
 Call `reset` at episode boundaries, interventions or task/batch changes. The application owns
 control timing and execution; RTC arguments are unsupported.
 
@@ -377,7 +379,31 @@ do not pre-tile them for the Python API.
 
 See [SO-101 camera mapping](so101-lora.md#so-101-camera-keys-and-tiling) for its physical roles.
 `grid` supports custom layouts but requires training for that layout. Use the camera arrangement
-expected by your checkpoint.
+expected by your checkpoint. Cameras may differ in resolution: `droid` resizes every camera to
+360 × 640, the other layouts resize to the largest camera before composing. Pass cameras as separate
+streams rather than a pre-composed image, so training augmentation and camera dropout apply per camera.
+
+### Action parameterizations
+
+`action_parameterization` sets what the action tokens carry. Inference always returns absolute
+commands in dataset units. Channels in `absolute_action_dims`, typically grippers, stay absolute.
+
+| Mode | Targets | Suited to |
+|---|---|---|
+| `absolute` | Commands as recorded | The released DROID checkpoint; robots whose measured state lags or differs from commands |
+| `joint_delta` | Per-frame differences `a[t] - a[t-1]`, integrated at inference | Whole chunks executed open loop, as in the SO-101 recipe |
+| `joint_relative` | Commands minus the measured state at request time, one anchor per chunk | Frequent replanning on arms that track their commands closely |
+
+Index LeRobot data with the matching `--action-parameterization`, since the trainer requires the
+statistics and the policy to agree. To normalize with your own z-score statistics instead, set
+`action_normalization` or `state_normalization` to `{"mean": [...], "std": [...]}`; they are stored
+as range bounds `mean ± std`. When unsure, train short runs of two modes and compare them
+on the same evaluation seeds.
+
+End-effector action spaces are in progress. Until they land, end-effector poses can be converted
+in your own dataset code and trained as `absolute` actions. Feedback from users who tried this
+found that poses relative to the end-effector pose at the start of each chunk performed clearly
+better than absolute poses.
 
 ### Reference DROID inference settings
 

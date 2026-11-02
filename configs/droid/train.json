@@ -29,6 +29,7 @@
   "eps": 1e-08,
   "weight_decay": 0.05,
   "fused_optimizer": true,
+  "max_grad_norm": null,
   "ema_sigma_rels": [0.1, 0.05],
   "checkpoint_every": 1000,
   "log_every": 10,

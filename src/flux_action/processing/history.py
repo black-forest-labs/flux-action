@@ -128,6 +128,8 @@ def conditioning_values(states: Tensor, commands: Tensor, config: "PolicyConfig"
         past = commands[:, 1:].float()
         if config.action_parameterization == "joint_delta":
             past = normalization.deltas(past, commands[:, 0].float(), config.absolute_action_dims)
+        elif config.action_parameterization == "joint_relative":
+            past = normalization.relative(past, states[:, -1].float(), config.absolute_action_dims)
         past = normalization.normalize(past, config.action_normalization, config.normalization_clip)
         past = torch.cat([torch.zeros_like(commands[:, :1]), past], 1)
         values = torch.cat([past, values], -1)

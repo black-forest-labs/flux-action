@@ -25,7 +25,7 @@ from .processing import packing
 # so a trunk without the image and audio streams predicts identical actions.
 CONTENT_STREAMS = ("video", "video_cond", "image", "image_cond", "audio", "audio_cond")
 REQUIRED_CONTENT_STREAMS = ("video", "video_cond")
-ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta")
+ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta", "joint_relative")
 
 # Inference settings the selected DROID checkpoint was chosen and benchmarked with: Cosmos UniPC,
 # four denoising steps, inference timestep shift 5 (distinct from the training shift 42), guidance
@@ -63,7 +63,9 @@ class PolicyConfig:
     # stored (DROID). "joint_delta": per-frame differences a[t] - a[t-1] on every channel except
     # absolute_action_dims, which stay absolute (SO-101: the gripper); a training window then needs the
     # command before its first one (``action_prev`` in the batch), and inference integrates the predicted
-    # deltas onto the observed state (target[k] = state + sum(delta[:k + 1])), open loop.
+    # deltas onto the observed state (target[k] = state + sum(delta[:k + 1])), open loop. "joint_relative": every
+    # command of the chunk minus the measured state at request time (the last observed state), again except
+    # absolute_action_dims; inference adds the predicted targets back onto that one state, without integration.
     action_parameterization: str = "absolute"
     absolute_action_dims: tuple[int, ...] = ()
     # Range normalization of the action targets and of the state token, per channel:
@@ -71,6 +73,8 @@ class PolicyConfig:
     # where that is at most 1e-6. {"q01": [...], "q99": [...]} with action_dim entries each, or None for the
     # identity (DROID radians and closed fractions need none). ``flux-action index-lerobot`` computes them; the
     # trainer fills empty fields from the index and refuses bounds that disagree with it. Exports carry them.
+    # {"mean": [...], "std": [...]} is accepted too and stored as q01 = mean - std, q99 = mean + std, which
+    # makes x_norm = (x - mean) / std.
     action_normalization: dict[str, list[float]] | None = None
     state_normalization: dict[str, list[float]] | None = None
     normalization_clip: float = 6.0
@@ -224,7 +228,7 @@ class PolicyConfig:
         assert self.action_parameterization != "absolute" or not self.absolute_action_dims, (
             "absolute actions cannot mix delta dimensions"
         )
-        if self.action_parameterization == "joint_delta":
+        if self.action_parameterization in ("joint_delta", "joint_relative"):
             absolute = {d % self.action_dim for d in self.absolute_action_dims}
             assert all(d % self.action_dim in absolute for d in self.gripper_flip_dims), (
                 "gripper dimensions must stay absolute"
@@ -233,7 +237,15 @@ class PolicyConfig:
             value = getattr(self, name)
             if value is None:
                 continue
-            assert set(value) == {"q01", "q99"}, "normalization requires q01 and q99"
+            if set(value) == {"mean", "std"}:
+                mean, std = (list(map(float, value[k])) for k in ("mean", "std"))
+                assert len(mean) == len(std), "normalization width mismatch"
+                assert all(sd > 0 for sd in std), "normalization std must be positive"
+                value = {
+                    "q01": [m - sd for m, sd in zip(mean, std, strict=True)],
+                    "q99": [m + sd for m, sd in zip(mean, std, strict=True)],
+                }
+            assert set(value) == {"q01", "q99"}, "normalization requires q01 and q99, or mean and std"
             q01, q99 = (list(map(float, value[k])) for k in ("q01", "q99"))
             assert len(q01) == len(q99) == self.action_dim, "normalization width mismatch"
             assert all(math.isfinite(x) for x in q01 + q99), "nonfinite normalization bound"
