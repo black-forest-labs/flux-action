@@ -452,6 +452,28 @@ def control_loop(policy, robot, steps, overlap):
         sent += 1
 ```
 
+Choose `overlap` and `rtc_max_prefix` from your latency: the commands that run during one
+prediction are latency × control rate, rounded up. Use the slowest latency you see, not the
+average, and add a margin. For example, with 250 ms per prediction:
+
+| Control rate | Commands during one prediction | Suggested `rtc_max_prefix` |
+|---|---|---|
+| 15 Hz | 4 | 6 |
+| 30 Hz | 8 | 10 |
+| 50 Hz | 13 | 15 |
+
+Measure latency by timing `predict_action_chunk` on the robot computer after a few warm-up calls,
+including any network hop. Faster control rates need a larger prefix and enough chunk left after it.
+If latency is high, first make prediction faster (fewer sampling steps, compilation) rather than
+raising the prefix: a larger prefix keeps motion smooth, but the robot reacts later to what it sees.
+
+Latency depends heavily on the deployment. The defaults in this repository favor simplicity: an
+uncompiled model with several sampling steps and guidance typically takes several hundred
+milliseconds per prediction. With compilation, lower precision and distillation to a single
+sampling step, we have measured model latency of about 140 ms on an NVIDIA RTX 5090, which allows a
+much smaller prefix and faster reactions. These optimizations are not part of this release;
+contact us if you need an optimized deployment checkpoint.
+
 ### Reference DROID inference settings
 
 The DROID root package saves these reference settings. The CLI and RoboLab server preserve
