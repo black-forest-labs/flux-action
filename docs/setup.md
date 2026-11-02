@@ -407,72 +407,22 @@ better than absolute poses.
 
 ### Real-time chunking
 
-With real-time chunking, the robot keeps executing the current chunk while the next one is
-predicted, and the new chunk must start with the commands that will run during that prediction.
-Train with `rtc_max_prefix` (for example 15): each training window then treats its first 0 to
-`rtc_max_prefix` commands as already known. At inference, pass the commands already sent:
+Real-time chunking lets the robot keep moving while the next chunk is predicted. Train with
+`rtc_max_prefix` (for example 15), then pass the commands that will run during the prediction:
 
 ```python
 chunk = policy.predict_action_chunk(observation, committed_actions=committed)  # (B, P, action_dim)
 ```
 
-The first `P` commands come back unchanged and the rest continue them, at no extra cost per
-step. This works with `absolute` and `joint_relative` actions and only on checkpoints trained
-with `rtc_max_prefix > 0`; the default 0 trains and predicts exactly as before.
+The first `P` commands come back unchanged and the rest continue smoothly from them. This works
+with `absolute` and `joint_relative` actions. In a control loop, start the next prediction in a
+background thread when `P` commands of the current chunk remain, pass those commands as
+`committed_actions`, and switch to the new chunk once they have been sent. `select_action` does the
+same with `rtc_overlap`, but the robot waits while it predicts.
 
-`select_action` does this for you with `rtc_overlap` (at most `rtc_max_prefix`): when that many
-commands are still queued, it predicts the next chunk with them committed, so chunks join without a
-jump. The robot still waits while it predicts. To keep the robot moving, predict in the background;
-`overlap` must then cover the commands that run during one prediction (latency × control rate):
-
-```python
-import threading
-
-import torch
-
-
-def control_loop(policy, robot, steps, overlap):
-    """Send one command per tick while the next chunk is predicted in a background thread."""
-    n = policy.config.n_action_steps
-    queue = list(policy.predict_action_chunk(robot.observation())[0, :n])
-    worker, result, sent = None, {}, 0
-    for _ in range(steps):
-        if worker is None and len(queue) <= overlap:
-            obs, committed = robot.observation(), torch.stack(queue)[None]
-
-            def predict(obs=obs, committed=committed):
-                result["chunk"] = policy.predict_action_chunk(obs, committed_actions=committed)[0, :n]
-
-            worker, sent = threading.Thread(target=predict), 0
-            worker.start()
-        if worker is not None and (not queue or not worker.is_alive()):
-            worker.join()  # waits only if the prediction took longer than `overlap` commands
-            queue, worker = list(result["chunk"][sent:]), None
-        robot.send(queue.pop(0))
-        sent += 1
-```
-
-Choose `overlap` and `rtc_max_prefix` from your latency: the commands that run during one
-prediction are latency × control rate, rounded up. Use the slowest latency you see, not the
-average, and add a margin. For example, with 250 ms per prediction:
-
-| Control rate | Commands during one prediction | Suggested `rtc_max_prefix` |
-|---|---|---|
-| 15 Hz | 4 | 6 |
-| 30 Hz | 8 | 10 |
-| 50 Hz | 13 | 15 |
-
-Measure latency by timing `predict_action_chunk` on the robot computer after a few warm-up calls,
-including any network hop. Faster control rates need a larger prefix and enough chunk left after it.
-If latency is high, first make prediction faster (fewer sampling steps, compilation) rather than
-raising the prefix: a larger prefix keeps motion smooth, but the robot reacts later to what it sees.
-
-Latency depends heavily on the deployment. The defaults in this repository favor simplicity: an
-uncompiled model with several sampling steps and guidance typically takes several hundred
-milliseconds per prediction. With compilation, lower precision and distillation to a single
-sampling step, we have measured model latency of about 140 ms on an NVIDIA RTX 5090, which allows a
-much smaller prefix and faster reactions. These optimizations are not part of this release;
-contact us if you need an optimized deployment checkpoint.
+`P` must cover latency × control rate: 250 ms at 30 Hz is 8 commands, so use about 10. Measure the
+slowest prediction on the robot computer. With compilation and distillation we measured about
+140 ms on an RTX 5090; contact us if you need an optimized deployment checkpoint.
 
 ### Reference DROID inference settings
 
