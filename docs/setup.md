@@ -363,7 +363,7 @@ predicted offset to the measured state at request time. `select_action` queues `
 commands before replanning and continues joint deltas from the last returned command; a
 joint-relative chunk is anchored at the state measured when it was requested.
 Call `reset` at episode boundaries, interventions or task/batch changes. The application owns
-control timing and execution; RTC arguments are unsupported.
+control timing and execution; for real-time chunking see [Real-time chunking](#real-time-chunking).
 
 ### Camera layouts
 
