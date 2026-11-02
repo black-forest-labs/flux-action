@@ -420,6 +420,38 @@ The first `P` commands come back unchanged and the rest continue them, at no ext
 step. This works with `absolute` and `joint_relative` actions and only on checkpoints trained
 with `rtc_max_prefix > 0`; the default 0 trains and predicts exactly as before.
 
+`select_action` does this for you with `rtc_overlap` (at most `rtc_max_prefix`): when that many
+commands are still queued, it predicts the next chunk with them committed, so chunks join without a
+jump. The robot still waits while it predicts. To keep the robot moving, predict in the background;
+`overlap` must then cover the commands that run during one prediction (latency × control rate):
+
+```python
+import threading
+
+import torch
+
+
+def control_loop(policy, robot, steps, overlap):
+    """Send one command per tick while the next chunk is predicted in a background thread."""
+    n = policy.config.n_action_steps
+    queue = list(policy.predict_action_chunk(robot.observation())[0, :n])
+    worker, result, sent = None, {}, 0
+    for _ in range(steps):
+        if worker is None and len(queue) <= overlap:
+            obs, committed = robot.observation(), torch.stack(queue)[None]
+
+            def predict(obs=obs, committed=committed):
+                result["chunk"] = policy.predict_action_chunk(obs, committed_actions=committed)[0, :n]
+
+            worker, sent = threading.Thread(target=predict), 0
+            worker.start()
+        if worker is not None and (not queue or not worker.is_alive()):
+            worker.join()  # waits only if the prediction took longer than `overlap` commands
+            queue, worker = list(result["chunk"][sent:]), None
+        robot.send(queue.pop(0))
+        sent += 1
+```
+
 ### Reference DROID inference settings
 
 The DROID root package saves these reference settings. The CLI and RoboLab server preserve

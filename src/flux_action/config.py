@@ -74,6 +74,10 @@ class PolicyConfig:
     # (``committed_actions``) and predict a chunk that continues them. 0 = off. Not for joint_delta, whose
     # targets chain from one frame to the next.
     rtc_max_prefix: int = 0
+    # select_action with RTC: predict the next chunk when this many commands are still queued and commit them
+    # as its start, so chunks join without a jump. 0 = predict only when the queue is empty. At most
+    # rtc_max_prefix and below n_action_steps. The robot waits during the prediction.
+    rtc_overlap: int = 0
     # Range normalization of the action targets and of the state token, per channel:
     # x_norm = clip(2 (x - q01) / span - 1, -normalization_clip, normalization_clip) with span = q99 - q01, or 1
     # where that is at most 1e-6. {"q01": [...], "q99": [...]} with action_dim entries each, or None for the
@@ -220,6 +224,7 @@ class PolicyConfig:
             raise ValueError("rtc_max_prefix must be an integer in [0, chunk_size)")
         if self.rtc_max_prefix and self.action_parameterization == "joint_delta":
             raise ValueError("RTC prefixes require absolute or joint_relative actions")
+        self._validate_rtc_overlap()
         assert all(math.isfinite(x) and x > 0 for x in (self.fps, self.action_scale)), "invalid action timing"
         assert all(-self.action_dim <= d < self.action_dim for d in self.gripper_flip_dims), (
             "invalid gripper dimension"
@@ -294,6 +299,14 @@ class PolicyConfig:
         assert self.guidance_scale_action is None or math.isfinite(self.guidance_scale_action), (
             "invalid action guidance"
         )
+        self._validate_rtc_overlap()
+
+    def _validate_rtc_overlap(self):
+        # an inference setting: checked again before prediction, since callers may change it after loading
+        if not isinstance(self.rtc_overlap, int) or not 0 <= self.rtc_overlap <= self.rtc_max_prefix:
+            raise ValueError("rtc_overlap must be an integer in [0, rtc_max_prefix]")
+        if self.rtc_overlap >= self.n_action_steps:
+            raise ValueError("rtc_overlap must be smaller than n_action_steps")
 
     @property
     def conditioning_channels(self) -> int:

@@ -1119,7 +1119,10 @@ class FluxActionPolicy(nn.Module):
             return None
         if cfg.inference_profile == "history":
             batch = history.observation_window(batch, cfg)
-        return self._action_targets(self._flip(committed_actions.float()), self._action_reference(batch))
+        reference = self._action_reference(batch)
+        if reference is not None:
+            reference = reference.to(committed_actions.device)
+        return self._action_targets(self._flip(committed_actions.float()), reference)
 
     @torch.no_grad()
     def actions_from_targets(self, targets: Tensor, state: Tensor) -> Tensor:
@@ -1198,6 +1201,10 @@ class FluxActionPolicy(nn.Module):
         ``joint_delta`` policy continues from its last returned command, initially the observed state).
 
         Reset between episodes or interventions. Measured state still conditions every new prediction.
+        With ``rtc_overlap`` > 0 the next chunk is predicted while that many commands are still queued, and
+        they are committed as its start (see :meth:`predict_action_chunk`), so consecutive chunks join
+        without a jump. The call that predicts blocks; to keep the robot moving during prediction, call
+        :meth:`predict_action_chunk` from your own control loop instead.
         """
         if kwargs:
             raise NotImplementedError(
@@ -1205,11 +1212,10 @@ class FluxActionPolicy(nn.Module):
             )
         if self.config.inference_profile == "history":
             window = self._observation_history.append(batch, self.config, self._last_command)
-            if self.config.action_parameterization == "joint_relative":
+            if self.config.action_parameterization == "joint_relative" or self.config.rtc_overlap:
                 # The whole chunk is anchored at the request's measured state, not stepped from the last command.
-                if not self._action_queue:
-                    actions = self.predict_action_chunk(window)[:, : self.config.n_action_steps]
-                    self._action_queue.extend(actions.transpose(0, 1))
+                if len(self._action_queue) <= self.config.rtc_overlap:
+                    self._refill_action_queue(window)
                 action = self._action_queue.popleft()
                 self._last_command = action.detach().clone()
                 return action
@@ -1220,15 +1226,24 @@ class FluxActionPolicy(nn.Module):
             action = self.actions_from_targets(target[:, None], window["command_history"][:, -1])[:, 0]
             self._last_command = action.detach().clone()
             return action
-        if len(self._action_queue) == 0:
+        if len(self._action_queue) <= self.config.rtc_overlap:
             if self.config.action_parameterization == "joint_delta":
                 targets = self.predict_normalized_targets(batch)
                 anchor = self._state(batch) if self._last_command is None else self._last_command
                 actions = self.actions_from_targets(targets, anchor)
+                self._action_queue.extend(actions[:, : self.config.n_action_steps].transpose(0, 1))
             else:
-                actions = self.predict_action_chunk(batch)
-            self._action_queue.extend(actions[:, : self.config.n_action_steps].transpose(0, 1))
+                self._refill_action_queue(batch)
         action = self._action_queue.popleft()
         if self.config.action_parameterization == "joint_delta":
             self._last_command = action.detach().clone()
         return action
+
+    def _refill_action_queue(self, batch: dict[str, Any]) -> None:
+        """Predict the next chunk of absolute commands into the queue; commands still queued (``rtc_overlap``)
+        are committed as its start and come back unchanged."""
+        committed = torch.stack(list(self._action_queue), dim=1) if self._action_queue else None
+        rtc = {} if committed is None else {"committed_actions": committed}
+        actions = self.predict_action_chunk(batch, **rtc)[:, : self.config.n_action_steps]
+        self._action_queue.clear()
+        self._action_queue.extend(actions.transpose(0, 1))

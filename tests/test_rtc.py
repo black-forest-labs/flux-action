@@ -212,3 +212,108 @@ def test_invalid_prefixes_are_rejected():
     obs = {"images.top": batch["images.top"][:1, :1], "state": batch["state"][:1], "task": "move"}
     with pytest.raises(ValueError, match="rtc_max_prefix"):
         plain.predict_action_chunk(obs, committed_actions=batch["action"][:1, :2])
+
+
+def test_overlap_validation():
+    absolute_config(rtc_overlap=15)
+    with pytest.raises(ValueError, match="rtc_overlap"):
+        absolute_config(rtc_overlap=16)
+    with pytest.raises(ValueError, match="rtc_overlap"):
+        tiny_config(rtc_overlap=1)
+    with pytest.raises(ValueError, match="n_action_steps"):
+        absolute_config(rtc_overlap=4, n_action_steps=4)
+    config = absolute_config()
+    config.rtc_overlap = 20  # changed after loading: caught before the next prediction
+    with pytest.raises(ValueError, match="rtc_overlap"):
+        config.validate_inference()
+
+
+def chunk_stub(policy, calls):
+    """predict_action_chunk stand-in: chunk n holds 100 * n + k, with the committed commands as its start."""
+
+    def predict(batch, committed_actions=None):
+        calls.append(None if committed_actions is None else committed_actions.clone())
+        chunk = 100.0 * len(calls) + torch.arange(32.0)[None, :, None].expand(1, 32, 6).clone()
+        if committed_actions is not None:
+            chunk[:, : committed_actions.shape[1]] = committed_actions
+        return chunk
+
+    return predict
+
+
+@pytest.mark.parametrize(
+    "make_config",
+    [lambda **kw: absolute_config(**kw), lambda **kw: history_config(**kw)],
+    ids=["absolute", "history_relative"],
+)
+def test_select_action_commits_the_queued_commands(make_config, monkeypatch):
+    policy = make_policy(make_config(rtc_overlap=5, n_action_steps=8))
+    calls = []
+    monkeypatch.setattr(policy, "predict_action_chunk", chunk_stub(policy, calls))
+    obs = {"images.top": torch.zeros(1, 3, 64, 96), "state": torch.zeros(1, 6), "task": "move"}
+    returned = [float(policy.select_action(obs)[0, 0]) for _ in range(9)]
+    # chunk 1 gives 8 commands; at 5 left a new chunk starts with those 5 and adds 3 new ones, so the
+    # robot sees one continuous sequence: chunk 1 to its end, then chunk 2's new commands
+    assert returned == [100, 101, 102, 103, 104, 105, 106, 107, 205]
+    assert calls[0] is None
+    torch.testing.assert_close(calls[1][0, :, 0], torch.tensor([103.0, 104, 105, 106, 107]))
+    torch.testing.assert_close(calls[2][0, :, 0], torch.tensor([106.0, 107, 205, 206, 207]))
+    assert len(calls) == 3
+
+
+def test_select_action_without_overlap_is_unchanged(monkeypatch):
+    policy = make_policy(absolute_config(n_action_steps=4))
+    calls = []
+    monkeypatch.setattr(policy, "predict_action_chunk", chunk_stub(policy, calls))
+    obs = {"images.top": torch.zeros(1, 3, 64, 96), "state": torch.zeros(1, 6), "task": "move"}
+    returned = [float(policy.select_action(obs)[0, 0]) for _ in range(6)]
+    assert returned == [100, 101, 102, 103, 200, 201]
+    assert calls == [None, None]
+
+
+def test_select_action_overlap_runs_the_real_model():
+    policy = make_policy(absolute_config(rtc_overlap=3, n_action_steps=6)).eval()
+    obs = {"images.top": torch.rand(1, 3, 64, 96), "state": torch.zeros(1, 6), "task": "move"}
+    first = policy.predict_action_chunk(obs)[0, :6]
+    returned = torch.stack([policy.select_action(obs)[0] for _ in range(7)])
+    torch.testing.assert_close(returned[:6], first, rtol=0, atol=0)  # 3 committed commands come back exactly
+    assert torch.isfinite(returned).all()
+
+
+def test_docs_background_loop_runs():
+    import pathlib
+    import re
+
+    docs = (pathlib.Path(__file__).parents[1] / "docs" / "setup.md").read_text()
+    section = docs.split("### Real-time chunking", 1)[1].split("\n### ", 1)[0]
+    (code,) = [
+        block for block in re.findall(r"```python\n(.*?)```", section, re.S) if "def control_loop" in block
+    ]
+    namespace = {}
+    exec(code, namespace)
+    policy = make_policy(absolute_config(n_action_steps=8)).eval()
+    first = policy.predict_action_chunk(
+        {
+            "images.top": torch.rand(1, 3, 64, 96, generator=torch.Generator().manual_seed(1)),
+            "state": torch.zeros(1, 6),
+            "task": "move",
+        }
+    )[0, :8]
+
+    class Robot:
+        sent = []
+
+        def observation(self):
+            obs = {"images.top": torch.rand(1, 3, 64, 96, generator=torch.Generator().manual_seed(1))}
+            return {**obs, "state": torch.zeros(1, 6), "task": "move"}
+
+        def send(self, command):
+            self.sent.append(command)
+
+    robot = Robot()
+    namespace["control_loop"](policy, robot, steps=20, overlap=3)
+    sent = torch.stack(robot.sent)
+    assert sent.shape == (20, 6) and torch.isfinite(sent).all()
+    torch.testing.assert_close(
+        sent[:8], first, rtol=0, atol=0
+    )  # the committed tail of chunk 1 runs unchanged
