@@ -415,10 +415,11 @@ chunk = policy.predict_action_chunk(observation, committed_actions=committed)  #
 ```
 
 The first `P` commands come back unchanged and the rest continue smoothly from them. This works
-with `absolute` and `joint_relative` actions. In a control loop, start the next prediction in a
-background thread when `P` commands of the current chunk remain, pass those commands as
-`committed_actions`, and switch to the new chunk once they have been sent. `select_action` does the
-same with `rtc_overlap`, but the robot waits while it predicts.
+with `absolute` and `joint_relative` actions, on the reference path only: do not call
+`prepare_inference()`. In a control loop, start the next prediction in a background thread when `P`
+commands of the current chunk remain, pass those commands as `committed_actions`, and once they
+have been sent continue with `chunk[:, P:]`. `select_action` does the same with `rtc_overlap`, but
+the robot waits while it predicts.
 
 `P` must cover latency × control rate: 250 ms at 30 Hz is 8 commands, so use about 10. Measure the
 slowest prediction on the robot computer. With compilation and distillation we measured about
