@@ -6,7 +6,7 @@ model and processor settings. This workflow uses LeRobot's trainer and adapter l
 standalone `flux-action` provides full fine-tuning and base-policy inference.
 
 The implementation is pinned to LeRobot
-[`c027ee36`](https://github.com/huggingface/collab-lerobot-nv-bfl-flux3/tree/c027ee363363f8d86767c66786c6891478564d6c).
+[`f6c0f192`](https://github.com/huggingface/lerobot/tree/f6c0f192952d0dfe5a48805f9688711294461bff).
 
 This guide includes the LeRobot installation steps in a separate environment.
 See the shared setup guide for [checkpoint formats](setup.md#choose-a-checkpoint).
@@ -91,12 +91,12 @@ LeRobot is installed in its own Python 3.12 environment, separate from the `flux
 
 From this repository's root, check out the pinned LeRobot commit and create that environment
 with the training, FLUX Action, PEFT and EMA extras from the pinned
-[LeRobot setup instructions](https://github.com/huggingface/collab-lerobot-nv-bfl-flux3/blob/c027ee363363f8d86767c66786c6891478564d6c/docs/source/flux3.mdx#installation):
+[LeRobot setup instructions](https://github.com/huggingface/lerobot/blob/f6c0f192952d0dfe5a48805f9688711294461bff/docs/source/flux3.mdx#installation):
 
 ```sh
-git clone https://github.com/huggingface/collab-lerobot-nv-bfl-flux3.git ../lerobot-so101
+git clone https://github.com/huggingface/lerobot.git ../lerobot-so101
 cd ../lerobot-so101
-git checkout c027ee363363f8d86767c66786c6891478564d6c
+git checkout f6c0f192952d0dfe5a48805f9688711294461bff
 uv venv --python 3.12 .venv
 source .venv/bin/activate
 uv pip install -e ".[training,flux3,peft,diffusion]"
@@ -182,7 +182,7 @@ lerobot-train \
 Evaluate both `pretrained_model` and `pretrained_model_ema` before choosing one for inference;
 keep the base and encoders accessible.
 The pinned
-[LeRobot inference guide](https://github.com/huggingface/collab-lerobot-nv-bfl-flux3/blob/c027ee363363f8d86767c66786c6891478564d6c/docs/source/flux3.mdx#inference)
+[LeRobot inference guide](https://github.com/huggingface/lerobot/blob/f6c0f192952d0dfe5a48805f9688711294461bff/docs/source/flux3.mdx#inference)
 covers policy loading, saved processors and reset behavior. Run the policy and both processors
 on every control tick, then reset all three between episodes.
 
