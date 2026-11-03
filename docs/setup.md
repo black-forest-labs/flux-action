@@ -348,9 +348,9 @@ policy.config.validate_inference()
 policy.save_pretrained("outputs/droid/inference-export")
 ```
 
-The current DROID training recipe uses `action_prediction_droid`, matching the prepared
-backend. Existing exports with `action_modality="action"` require reference inference:
-use `--no-compile-dit` with `serve-robolab` (and omit `--compile-dit` with `infer`).
+`prepare_inference()` supports any BF16 checkpoint with the default transformer layout, whatever
+its action modality, action size, chunk size, sampler or inference profile, and returns `False`
+otherwise. Native FP8r packages support only the released DROID configuration.
 Keep existing runs and exports in their saved namespace; changing the sampler preset
 does not rename their weights.
 
@@ -415,8 +415,8 @@ chunk = policy.predict_action_chunk(observation, committed_actions=committed)  #
 ```
 
 The first `P` commands come back unchanged and the rest continue smoothly from them. This works
-with `absolute` and `joint_relative` actions, on the reference path only: do not call
-`prepare_inference()`. In a control loop, start the next prediction in a background thread when `P`
+with `absolute` and `joint_relative` actions, on the reference and prepared BF16 paths but not on
+FP8r packages. In a control loop, start the next prediction in a background thread when `P`
 commands of the current chunk remain, pass those commands as `committed_actions`, and once they
 have been sent continue with `chunk[:, P:]`. `select_action` does the same with `rtc_overlap`, but
 the robot waits while it predicts.

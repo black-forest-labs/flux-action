@@ -66,6 +66,36 @@ def _released_inference_config(config: PolicyConfig) -> bool:
     )
 
 
+def _prepared_bf16_dims(config: PolicyConfig):
+    """Sizes for the prepared BF16 backend, or ``None`` when the checkpoint's architecture needs features
+    it does not implement (late blocks, gates, QKV bias, extra content streams) or it is not BF16."""
+    from .models.transformer_inf_bf16 import Dims
+
+    params = JointSingleSeqParams(**{**config.dit_config, "attn_mode": config.attn_mode})
+    supported = (
+        config.torch_dtype == "bfloat16"
+        and tuple(config.content_streams or REQUIRED_CONTENT_STREAMS) == REQUIRED_CONTENT_STREAMS
+        and params.depth_late_blocks == 0
+        and params.gate_type is None
+        and not params.qkv_bias
+        and params.vec_in_dim is not None
+        and len(params.axes_dim) == 4
+    )
+    if not supported:
+        return None
+    return Dims(
+        hidden_size=params.hidden_size,
+        num_heads=params.num_heads,
+        mlp_size=int(params.hidden_size * params.mlp_ratio),
+        early_depth=params.depth,
+        joint_depth=params.depth_single_blocks,
+        context_dim=params.context_in_dim,
+        vector_dim=params.vec_in_dim,
+        axes_dim=tuple(params.axes_dim),
+        theta=params.theta,
+    )
+
+
 def _verify_policy_manifest(directory: Path, config_name: str) -> None:
     path = directory / "manifest.json"
     if not path.is_file():
@@ -264,7 +294,7 @@ class FluxActionPolicy(nn.Module):
         return policy.to(target).eval()
 
     def prepare_inference(self, *, compile: bool = True) -> bool:
-        """Install the prepared DROID backend and compile the DiT and VAE encoder.
+        """Install the prepared BF16 backend and compile the DiT and VAE encoder.
 
         BF16 policies stay trainable and saveable until this explicit operation.
         Native FP8r policies already own their prepared weights and only need
@@ -273,13 +303,14 @@ class FluxActionPolicy(nn.Module):
         # Older packages explicitly disable this; serving encodes only the observed frame.
         self.config.single_frame_encode = True
         if isinstance(self.dit, JointSingleSeq):
-            if not _released_inference_config(self.config) or self.device.type != "cuda":
+            dims = _prepared_bf16_dims(self.config)
+            if dims is None or self.device.type != "cuda":
                 return False
             from .models.transformer_inf_bf16 import BF16InferenceDiT
 
-            self.dit = BF16InferenceDiT.from_state_dict(self.dit.state_dict())
+            self.dit = BF16InferenceDiT.from_state_dict(self.dit.state_dict(), dims)
             self.reset()
-        else:
+        elif self.config.quantization == "fp8r":
             assert _released_inference_config(self.config), (
                 "prepared backend requires released DROID geometry"
             )
@@ -895,8 +926,6 @@ class FluxActionPolicy(nn.Module):
         flow = {"x_video": x_video.to(device), ak: x_action.to(device)}
         n_prefix = 0 if prefix_targets is None else prefix_targets.shape[0]
         if n_prefix:
-            if self._inference_prepared:
-                raise ValueError("committed actions are not supported by the prepared inference path")
             committed = prefix_targets.to(device).float()[None] * cfg.action_scale
             flow[ak][:, :n_prefix] = committed
         fixed = {
@@ -918,17 +947,19 @@ class FluxActionPolicy(nn.Module):
         ctx_uc = self._context("", device) if any(g != 1.0 for g in guidance.values()) else None
 
         if self._inference_prepared:
-            return (
-                self._sample_prepared(
-                    flow=flow,
-                    fixed=fixed,
-                    caption=caption,
-                    ctx_c=ctx_c,
-                    ctx_uc=ctx_uc,
-                    guidance=guidance,
-                )[ak][0].float()
-                / cfg.action_scale
+            out = self._sample_prepared(
+                flow=flow,
+                fixed=fixed,
+                caption=caption,
+                ctx_c=ctx_c,
+                ctx_uc=ctx_uc,
+                guidance=guidance,
+                committed=committed if n_prefix else None,
             )
+            result = out[ak][0].float() / cfg.action_scale
+            if n_prefix:
+                result[:n_prefix] = prefix_targets.to(result)
+            return result
 
         assert isinstance(self.dit, JointSingleSeq), "call prepare_inference before prediction"
 
@@ -988,8 +1019,10 @@ class FluxActionPolicy(nn.Module):
         ctx_c: tuple[Tensor, Tensor],
         ctx_uc: tuple[Tensor, Tensor] | None,
         guidance: dict[str, float],
+        committed: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """Run the existing solver over an optimized prepared DROID DiT."""
+        """Run the configured solver over the prepared BF16 or FP8r DiT. ``committed`` ``(1, P, D)`` (RTC, in
+        model units): the first ``P`` action tokens stay clean at timestep 0, as on the reference path."""
         cfg, model = self.config, self.dit
         action_key = f"x_{self.modality}"
         cond_key = f"{action_key}_cond"
@@ -1009,9 +1042,24 @@ class FluxActionPolicy(nn.Module):
 
         request = prepare(caption, ctx_c)
         negative_request = prepare("", ctx_uc) if ctx_uc is not None else None
-        _, ticks = sampling.cosmos_unipc_schedule(cfg.num_inference_steps, cfg.sampler_shift)
-        times = ticks.to(device=self.device, dtype=torch.float32) / 1000.0
-        steps = model.prepare_steps(request, times, times)
+        if cfg.sampler == "cosmos_unipc":
+            _, ticks = sampling.cosmos_unipc_schedule(cfg.num_inference_steps, cfg.sampler_shift)
+            # Divide on the device: CUDA scalar division rounds differently from CPU, and released DROID
+            # outputs are pinned to this exact expression.
+            times = ticks.to(device=self.device, dtype=torch.float32) / 1000.0
+        else:
+            # The reference path's Euler times (CPU float32), so both paths condition on identical values.
+            grid = torch.linspace(1.0, 0.0, cfg.num_inference_steps + 1)
+            times = sampling.timeshift(cfg.sampler_shift, grid)[:-1].float().to(self.device)
+        n_prefix = 0 if committed is None else committed.shape[1]
+        if n_prefix:
+            if self.config.quantization == "fp8r":
+                raise ValueError(
+                    "committed actions are not supported by the FP8r backend; load the BF16 weights"
+                )
+            steps = model.prepare_steps(request, times, times, action_prefix=n_prefix)
+        else:
+            steps = model.prepare_steps(request, times, times)
         phase = 0
 
         def predict(samples: dict[str, Tensor], _t) -> dict[str, Tensor]:
@@ -1020,6 +1068,8 @@ class FluxActionPolicy(nn.Module):
                 "video": samples["x_video"].to(torch.bfloat16),
                 "action": samples[action_key].to(torch.bfloat16),
             }
+            if n_prefix:
+                inputs["action"][:, :n_prefix] = committed.to(torch.bfloat16)
             if negative_request is None:
                 result = model.forward_prepared(request, steps[phase], **inputs).as_dict()
             else:
@@ -1029,14 +1079,18 @@ class FluxActionPolicy(nn.Module):
                     key: negative[key] + guidance[key] * (positive[key] - negative[key]) for key in flow
                 }
             phase += 1
-            return {key: value.float() for key, value in result.items()}
+            result = {key: value.float() for key, value in result.items()}
+            if n_prefix:
+                result[action_key][:, :n_prefix] = (
+                    0.0  # no velocity: the committed tokens stay where they are
+                )
+            return result
 
-        return sampling.cosmos_unipc_order2(
-            flow,
-            predict,
-            n_steps=cfg.num_inference_steps,
-            shift=cfg.sampler_shift,
-        )
+        if cfg.sampler == "cosmos_unipc":
+            return sampling.cosmos_unipc_order2(
+                flow, predict, n_steps=cfg.num_inference_steps, shift=cfg.sampler_shift
+            )
+        return sampling.euler(flow, predict, n_steps=cfg.num_inference_steps, alpha=cfg.sampler_shift)
 
     @torch.no_grad()
     def training_targets(self, batch: dict[str, Any]) -> Tensor:

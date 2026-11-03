@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Self-contained BF16 inference transformer for the released DROID policy.
+"""Self-contained BF16 inference transformer for policies with the default stream layout.
 
 This module deliberately owns its attention, transformer blocks, prepared
 state, and RoPE layout.  It shares checkpoint names with the training model,
@@ -20,6 +20,7 @@ but never calls training/reference blocks at runtime.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -31,21 +32,23 @@ from torch import Tensor, nn
 
 VIDEO = "video"
 VIDEO_COND = "video_cond"
-ACTION = "action_prediction_droid"
-ACTION_COND = "action_prediction_droid_cond"
-STREAM_ORDER = (VIDEO, VIDEO_COND, ACTION, ACTION_COND)
-CHANNELS = {VIDEO: 96, VIDEO_COND: 96, ACTION: 8, ACTION_COND: 8}
-HIDDEN_SIZE = 3072
-NUM_HEADS = 24
-MLP_SIZE = 9216
-EARLY_DEPTH = 5
-JOINT_DEPTH = 28
-CONTEXT_DIM = 20480
-VECTOR_DIM = 768
-AXES_DIM = (32, 32, 32, 32)
-THETA = 10000
 
 ModulationTuple = tuple[Tensor, Tensor, Tensor]
+
+
+@dataclass(frozen=True)
+class Dims:
+    """Transformer sizes; the defaults are the released 7B model."""
+
+    hidden_size: int = 3072
+    num_heads: int = 24
+    mlp_size: int = 9216
+    early_depth: int = 5
+    joint_depth: int = 28
+    context_dim: int = 20480
+    vector_dim: int = 768
+    axes_dim: tuple[int, ...] = (32, 32, 32, 32)
+    theta: int = 10000
 
 
 @dataclass(frozen=True)
@@ -97,12 +100,13 @@ class _PreparedStep:
 
 
 @dataclass(frozen=True)
-class DroidPrediction:
+class Prediction:
     video: Tensor
     action: Tensor
+    action_key: str
 
     def as_dict(self) -> dict[str, Tensor]:
-        return {"x_video": self.video, "x_action_prediction_droid": self.action}
+        return {"x_video": self.video, self.action_key: self.action}
 
 
 def _rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -219,19 +223,19 @@ class _Attention(nn.Module):
 
 
 class _ModeBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, dims: Dims):
         super().__init__()
-        hidden_size = HIDDEN_SIZE
-        self.num_heads = NUM_HEADS
+        hidden_size = dims.hidden_size
+        self.num_heads = dims.num_heads
         self.hidden_size = hidden_size
-        self.mlp_hidden_dim = MLP_SIZE
+        self.mlp_hidden_dim = dims.mlp_size
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.mlp_in = nn.Linear(hidden_size, 2 * MLP_SIZE, bias=False)
+        self.mlp_in = nn.Linear(hidden_size, 2 * dims.mlp_size, bias=False)
         self.attn_out = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.mlp_out = nn.Linear(MLP_SIZE, hidden_size, bias=False)
-        self.norm = _QKNorm(hidden_size // NUM_HEADS)
+        self.mlp_out = nn.Linear(dims.mlp_size, hidden_size, bias=False)
+        self.norm = _QKNorm(hidden_size // dims.num_heads)
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = _SwiGLU()
         self.attention = _Attention()
@@ -289,19 +293,19 @@ def _gate_segments(
 
 
 class _JointBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, dims: Dims):
         super().__init__()
-        hidden_size = HIDDEN_SIZE
-        self.num_heads = NUM_HEADS
+        hidden_size = dims.hidden_size
+        self.num_heads = dims.num_heads
         self.hidden_size = hidden_size
-        self.mlp_hidden_dim = MLP_SIZE
+        self.mlp_hidden_dim = dims.mlp_size
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.mlp_in = nn.Linear(hidden_size, 2 * MLP_SIZE, bias=False)
+        self.mlp_in = nn.Linear(hidden_size, 2 * dims.mlp_size, bias=False)
         self.attn_out = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.mlp_out = nn.Linear(MLP_SIZE, hidden_size, bias=False)
-        self.norm = _QKNorm(hidden_size // NUM_HEADS)
+        self.mlp_out = nn.Linear(dims.mlp_size, hidden_size, bias=False)
+        self.norm = _QKNorm(hidden_size // dims.num_heads)
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = _SwiGLU()
         self.attention = _Attention()
@@ -344,42 +348,51 @@ class _JointBlock(nn.Module):
 
 
 class BF16InferenceDiT(nn.Module):
-    """Released DROID BF16 DiT with opaque, explicitly owned prepared state."""
+    """BF16 DiT with opaque, explicitly owned prepared state.
 
-    def __init__(self):
+    ``in_channels`` maps the four streams (``video``, ``video_cond``, an action stream and its ``_cond``
+    stream) to their channel counts; :meth:`from_state_dict` reads them from the checkpoint."""
+
+    def __init__(self, in_channels: Mapping[str, int], dims: Dims = Dims()):
         super().__init__()
-        in_channels = CHANNELS
-        self.depth = EARLY_DEPTH
-
-        head_dim = HIDDEN_SIZE // NUM_HEADS
-        self.pe_embedder = _RopeEmbedder(head_dim, THETA, AXES_DIM)
-        self.emb_in = nn.ModuleDict(
-            {name: nn.Linear(channels, HIDDEN_SIZE, bias=False) for name, channels in in_channels.items()}
+        actions = sorted(set(in_channels) - {VIDEO, VIDEO_COND})
+        assert len(actions) == 2 and actions[1] == f"{actions[0]}_cond" and VIDEO in in_channels, (
+            f"expected video, video_cond, an action stream and its _cond stream, got {sorted(in_channels)}"
         )
-        self.txt_in = nn.Linear(CONTEXT_DIM, HIDDEN_SIZE, bias=False)
-        self.time_in = _MLPEmbedder(256, HIDDEN_SIZE)
-        self.vector_in = _MLPEmbedder(VECTOR_DIM, HIDDEN_SIZE)
+        assert VIDEO_COND in in_channels, "missing video_cond stream"
+        self.action, self.action_cond = actions
+        self.depth = dims.early_depth
+        hidden = dims.hidden_size
+
+        head_dim = hidden // dims.num_heads
+        self.pe_embedder = _RopeEmbedder(head_dim, dims.theta, tuple(dims.axes_dim))
+        self.emb_in = nn.ModuleDict(
+            {name: nn.Linear(channels, hidden, bias=False) for name, channels in in_channels.items()}
+        )
+        self.txt_in = nn.Linear(dims.context_dim, hidden, bias=False)
+        self.time_in = _MLPEmbedder(256, hidden)
+        self.vector_in = _MLPEmbedder(dims.vector_dim, hidden)
 
         sorted_modalities = sorted(in_channels)
         self.early_stream_modulations = nn.ModuleDict(
             {
-                **{name: _Modulation(HIDDEN_SIZE) for name in sorted_modalities},
-                "txt": _Modulation(HIDDEN_SIZE),
+                **{name: _Modulation(hidden) for name in sorted_modalities},
+                "txt": _Modulation(hidden),
             }
         )
         self.single_stream_modulations = nn.ModuleDict(
             {
-                **{name: _Modulation(HIDDEN_SIZE) for name in sorted_modalities},
-                "txt": _Modulation(HIDDEN_SIZE),
+                **{name: _Modulation(hidden) for name in sorted_modalities},
+                "txt": _Modulation(hidden),
             }
         )
         self.content_mode_blocks = nn.ModuleDict(
-            {name: nn.ModuleList(_ModeBlock() for _ in range(EARLY_DEPTH)) for name in sorted_modalities}
+            {name: nn.ModuleList(_ModeBlock(dims) for _ in range(self.depth)) for name in sorted_modalities}
         )
-        self.txt_mode_blocks = nn.ModuleList(_ModeBlock() for _ in range(EARLY_DEPTH))
-        self.single_blocks = nn.ModuleList(_JointBlock() for _ in range(JOINT_DEPTH))
+        self.txt_mode_blocks = nn.ModuleList(_ModeBlock(dims) for _ in range(self.depth))
+        self.single_blocks = nn.ModuleList(_JointBlock(dims) for _ in range(dims.joint_depth))
         self.final_layer = nn.ModuleDict(
-            {name: _LastLayer(HIDDEN_SIZE, channels) for name, channels in in_channels.items()}
+            {name: _LastLayer(hidden, channels) for name, channels in in_channels.items()}
         )
 
         self._compiled_text = None
@@ -389,13 +402,15 @@ class BF16InferenceDiT(nn.Module):
         self._packed = False
 
     @classmethod
-    def from_state_dict(
-        cls,
-        state_dict: Mapping[str, Tensor],
-    ) -> BF16InferenceDiT:
-        """Strictly load materialized BF16 tensors."""
+    def from_state_dict(cls, state_dict: Mapping[str, Tensor], dims: Dims = Dims()) -> BF16InferenceDiT:
+        """Strictly load materialized BF16 tensors; stream names and channels come from ``emb_in``."""
+        in_channels = {
+            name.removeprefix("emb_in.").removesuffix(".weight"): tensor.shape[1]
+            for name, tensor in state_dict.items()
+            if name.startswith("emb_in.")
+        }
         with torch.device("meta"):
-            model = cls()
+            model = cls(in_channels, dims)
         devices = {tensor.device for tensor in state_dict.values()}
         dtypes = {tensor.dtype for tensor in state_dict.values()}
         assert len(devices) == 1 and next(iter(devices)).type != "meta", "weights need one real device"
@@ -412,7 +427,7 @@ class BF16InferenceDiT(nn.Module):
                 for block in group:
                     block.pack_input_projection()
         del self.final_layer[VIDEO_COND]
-        del self.final_layer[ACTION_COND]
+        del self.final_layer[self.action_cond]
         self._packed = True
 
     def train(self, mode: bool = True) -> BF16InferenceDiT:
@@ -459,10 +474,10 @@ class BF16InferenceDiT(nn.Module):
         static_vector = self._embed_timestep(zero).to(ctx.dtype) + vector_embedding
         early_txt = self.early_stream_modulations["txt"](static_vector)
         early_video_cond = self.early_stream_modulations[VIDEO_COND](static_vector)
-        early_action_cond = self.early_stream_modulations[ACTION_COND](static_vector)
+        early_action_cond = self.early_stream_modulations[self.action_cond](static_vector)
         single_txt = self.single_stream_modulations["txt"](static_vector)
         single_video_cond = self.single_stream_modulations[VIDEO_COND](static_vector)
-        single_action_cond = self.single_stream_modulations[ACTION_COND](static_vector)
+        single_action_cond = self.single_stream_modulations[self.action_cond](static_vector)
         text_rope = self.pe_embedder(ctx_ids)
         txt = self.txt_in(ctx)
         for depth in range(self.depth):
@@ -495,12 +510,12 @@ class BF16InferenceDiT(nn.Module):
         action_rope = self.pe_embedder(action_ids)
         action_cond_rope = self.pe_embedder(action_cond_ids)
         encoded_video_cond = self.emb_in[VIDEO_COND](video_cond)
-        encoded_action_cond = self.emb_in[ACTION_COND](action_cond)
+        encoded_action_cond = self.emb_in[self.action_cond](action_cond)
         for depth in range(self.depth):
             encoded_video_cond = self.content_mode_blocks[VIDEO_COND][depth](
                 encoded_video_cond, video_cond_rope, early_video_cond
             )
-            encoded_action_cond = self.content_mode_blocks[ACTION_COND][depth](
+            encoded_action_cond = self.content_mode_blocks[self.action_cond][depth](
                 encoded_action_cond, action_cond_rope, early_action_cond
             )
         joint_rope = torch.cat((text_rope, video_rope, video_cond_rope, action_rope, action_cond_rope), dim=2)
@@ -515,11 +530,11 @@ class BF16InferenceDiT(nn.Module):
         video_vector = self._embed_timestep(video_timestep).to(vector_embedding.dtype) + vector_embedding
         action_vector = self._embed_timestep(action_timestep).to(vector_embedding.dtype) + vector_embedding
         early_video = self.early_stream_modulations[VIDEO](video_vector)
-        early_action = self.early_stream_modulations[ACTION](action_vector)
+        early_action = self.early_stream_modulations[self.action](action_vector)
         single_video = self.single_stream_modulations[VIDEO](video_vector)
-        single_action = self.single_stream_modulations[ACTION](action_vector)
+        single_action = self.single_stream_modulations[self.action](action_vector)
         final_values = []
-        for name, vector in ((VIDEO, video_vector), (ACTION, action_vector)):
+        for name, vector in ((VIDEO, video_vector), (self.action, action_vector)):
             head = self.final_layer[name]
             activated = head.adaLN_modulation[0](vector)
             shift_weight, scale_weight = head.adaLN_modulation[1].weight.chunk(2)
@@ -639,13 +654,38 @@ class BF16InferenceDiT(nn.Module):
         request: _PreparedRequest,
         video_timesteps: Tensor,
         action_timesteps: Tensor,
+        action_prefix: int = 0,
     ) -> tuple[_PreparedStep, ...]:
+        """One prepared step per timestep. The first ``action_prefix`` action tokens (committed commands,
+        real-time chunking) keep timestep 0 in every step, as in training."""
         assert video_timesteps.ndim == action_timesteps.ndim == 1, "invalid timestep rank"
         assert video_timesteps.shape == action_timesteps.shape, "timestep shape mismatch"
-        return tuple(
+        assert 0 <= action_prefix < request.action_len, "action prefix must leave tokens to predict"
+        steps = tuple(
             self.prepare_step(request, video_timesteps[index], action_timesteps[index])
             for index in range(video_timesteps.numel())
         )
+        if not action_prefix:
+            return steps
+        zero = torch.zeros((), dtype=torch.float32, device=request.device)
+        clean = self.prepare_step(request, zero, zero)
+        # Per-token action modulation: committed tokens select the timestep-0 values. The shape stays
+        # (B, action_len, H) for every prefix length, so a compiled hot path does not recompile per length.
+        committed = (torch.arange(request.action_len, device=request.device) < action_prefix)[None, :, None]
+
+        def pin(step: _PreparedStep) -> _PreparedStep:
+            def select(clean_value: Tensor, value: Tensor) -> Tensor:
+                return torch.where(committed, clean_value, value)
+
+            return dataclasses.replace(
+                step,
+                early_action=tuple(map(select, clean.early_action, step.early_action)),  # type: ignore[arg-type]
+                single_action=tuple(map(select, clean.single_action, step.single_action)),  # type: ignore[arg-type]
+                final_action_shift=select(clean.final_action_shift, step.final_action_shift),
+                final_action_scale=select(clean.final_action_scale, step.final_action_scale),
+            )
+
+        return tuple(pin(step) for step in steps)
 
     def _forward_math(
         self,
@@ -661,12 +701,12 @@ class BF16InferenceDiT(nn.Module):
         video_rope = request.rope[:, :, video_start:video_cond_start]
         action_rope = request.rope[:, :, action_start:action_cond_start]
         encoded_video = self.emb_in[VIDEO](video)
-        encoded_action = self.emb_in[ACTION](action)
+        encoded_action = self.emb_in[self.action](action)
         for depth in range(self.depth):
             encoded_video = self.content_mode_blocks[VIDEO][depth](
                 encoded_video, video_rope, step.early_video
             )
-            encoded_action = self.content_mode_blocks[ACTION][depth](
+            encoded_action = self.content_mode_blocks[self.action][depth](
                 encoded_action, action_rope, step.early_action
             )
         sequence = torch.cat(
@@ -692,9 +732,11 @@ class BF16InferenceDiT(nn.Module):
         action_hidden = sequence[:, action_start:action_cond_start]
         video_hidden = self.final_layer[VIDEO].norm_final(video_hidden)
         video_hidden.mul_(step.final_video_scale).add_(step.final_video_shift)
-        action_hidden = self.final_layer[ACTION].norm_final(action_hidden)
+        action_hidden = self.final_layer[self.action].norm_final(action_hidden)
         action_hidden.mul_(step.final_action_scale).add_(step.final_action_shift)
-        return self.final_layer[VIDEO].linear(video_hidden), self.final_layer[ACTION].linear(action_hidden)
+        return self.final_layer[VIDEO].linear(video_hidden), self.final_layer[self.action].linear(
+            action_hidden
+        )
 
     @torch.no_grad()
     def forward_prepared(
@@ -704,10 +746,10 @@ class BF16InferenceDiT(nn.Module):
         *,
         video: Tensor,
         action: Tensor,
-    ) -> DroidPrediction:
+    ) -> Prediction:
         core = self._compiled_hot if self._compiled_hot is not None else self._forward_math
         video_output, action_output = core(request, step, video, action)
-        return DroidPrediction(video_output, action_output)
+        return Prediction(video_output, action_output, f"x_{self.action}")
 
     def forward(self, *_args: Any, **_kwargs: Any):
         raise RuntimeError("use prepare_text/prepare_observation/prepare_steps/forward_prepared")
