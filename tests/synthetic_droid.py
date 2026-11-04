@@ -38,6 +38,18 @@ def frame_image(episode: int, frame: int, camera: int, frame_hw=FRAME_HW) -> np.
     return img
 
 
+def cartesian_pose(episode: int, frame: int) -> list[float]:
+    """A smooth end-effector path ``[x, y, z, rx, ry, rz]``; the command of frame ``i`` is the pose of ``i + 1``."""
+    return [
+        0.45 + 0.002 * frame,
+        -0.1 + 0.05 * episode + 0.001 * frame,
+        0.3 + 0.0015 * frame,
+        3.0 - 0.01 * frame,
+        0.1 * episode - 0.005 * frame,
+        0.2 + 0.008 * frame,
+    ]
+
+
 def write_av1_clip(path, frames: np.ndarray, fps: int = FPS) -> None:
     """Encode uint8 ``(N, H, W, 3)`` frames as AV1 with a keyframe every second frame."""
     av = pytest.importorskip("av")  # the data extra
@@ -118,6 +130,8 @@ def build_compact_dataset(root, episodes, frame_hw=FRAME_HW):
                     "action.gripper_position": [0.75],
                     "observation.state.joint_positions": [float(e) + i / 1000] * 7,
                     "observation.state.gripper_position": [0.25],
+                    "action.cartesian_position": cartesian_pose(e, i + 1),
+                    "observation.state.cartesian_position": cartesian_pose(e, i),
                 }
             )
         if episode.get("keep") is not None:

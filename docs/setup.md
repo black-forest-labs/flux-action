@@ -400,10 +400,11 @@ statistics and the policy to agree. To normalize with your own z-score statistic
 as range bounds `mean ± std`. When unsure, train short runs of two modes and compare them
 on the same evaluation seeds.
 
-End-effector action spaces are in progress. Until they land, end-effector poses can be converted
-in your own dataset code and trained as `absolute` actions. Feedback from users who tried this
-found that poses relative to the end-effector pose at the start of each chunk performed clearly
-better than absolute poses.
+The trainer has no end-effector parameterization; convert end-effector poses in your own dataset
+code and train them as `absolute` actions. Feedback from users who tried this found that poses
+relative to the end-effector pose at the start of each chunk performed clearly better than absolute
+poses. The base checkpoint has pretrained heads for such a relative layout, EE-50;
+[`examples/droid_ee50`](../examples/droid_ee50/README.md) fine-tunes them on DROID.
 
 ### Real-time chunking
 

@@ -29,3 +29,5 @@ encodes that frame alone instead of padding it to the VAE’s 45-frame chunk. Th
 latents and is off by default; retain the setting used by your checkpoint.
 
 [`examples/games`](../examples/games/README.md) does all of the above on two browser games.
+[`examples/droid_ee50`](../examples/droid_ee50/README.md) wraps the DROID index loader instead, converting
+each window to the base checkpoint's end-effector layout (EE-50).
