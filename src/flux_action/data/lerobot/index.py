@@ -66,7 +66,7 @@ MIN_MOVING_FRACTION = 0.02
 LONG_EPISODE_SECONDS = 300.0
 LONG_DEAD_FRACTION = 0.5
 DEGENERATE_SPAN = 1e-6  # a channel whose q99 - q01 is at most this uses span 1 (a gripper that never moved)
-ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta")
+ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta", "joint_relative")
 SUPPORTED_MAJOR_VERSIONS = (2, 3)
 
 __all__ = [
@@ -584,7 +584,8 @@ def normalize_dims(dims, dim: int) -> tuple[int, ...]:
 def action_targets(actions: np.ndarray, parameterization: str, absolute_dims: tuple[int, ...]) -> np.ndarray:
     """The training targets of one episode's actions ``(n, A)``: the actions themselves (``absolute``), or
     the per-frame deltas ``a[t] - a[t-1]`` with the first row zero and ``absolute_dims`` kept absolute
-    (``joint_delta``, the SO-101 recipe's parameterization and its builder's convention)."""
+    (``joint_delta``, the SO-101 recipe's parameterization and its builder's convention). ``joint_relative``
+    targets depend on the window start, see :func:`relative_window_targets`."""
     if parameterization == "absolute":
         return actions.astype(np.float64)
     if parameterization != "joint_delta":
@@ -599,6 +600,27 @@ def action_targets(actions: np.ndarray, parameterization: str, absolute_dims: tu
     return targets
 
 
+def relative_window_targets(
+    states: np.ndarray,
+    actions: np.ndarray,
+    starts: list[int],
+    chunk_size: int,
+    absolute_dims: tuple[int, ...],
+) -> np.ndarray:
+    """The ``joint_relative`` targets of one episode's windows, ``(len(starts) * chunk_size, A)``: for a window
+    starting at frame ``s``, ``a[s + k] - state[s]`` for ``k < chunk_size`` (the window dataset's measured
+    state at request time, in both inference profiles), with ``absolute_dims`` kept absolute."""
+    if not starts:
+        return np.zeros((0, actions.shape[1]))
+    actions = actions.astype(np.float64)
+    first = np.asarray(starts)[:, None]
+    windows = actions[first + np.arange(chunk_size)[None]]  # (W, chunk, A)
+    targets = windows - states.astype(np.float64)[first]
+    if absolute_dims:
+        targets[..., list(absolute_dims)] = windows[..., list(absolute_dims)]
+    return targets.reshape(-1, actions.shape[1])
+
+
 def build_statistics(
     manifest: dict,
     rows: np.ndarray,
@@ -607,7 +629,8 @@ def build_statistics(
     absolute_action_dims=(-1,),
     clip: float = NORMALIZATION_CLIP,
 ) -> dict:
-    """Per-channel q01 / q99 of the action targets and of the state over every frame of the kept episodes.
+    """Per-channel q01 / q99 of the action targets and of the state over every frame of the kept episodes
+    (``joint_relative`` targets: over every action of every allowed window, see :func:`relative_window_targets`).
 
     The percentiles are ``numpy.percentile`` (linear interpolation) over float64 values, the targets of
     ``action_targets`` per episode, over the train and the held-out episodes alike; this is the
@@ -617,9 +640,12 @@ def build_statistics(
     if action_parameterization not in ACTION_PARAMETERIZATIONS:
         raise ValueError(f"unknown action parameterization {action_parameterization!r}")
     state_dim, action_dim = int(manifest["state_dim"]), int(manifest["action_dim"])
-    dims = (
-        normalize_dims(absolute_action_dims, action_dim) if action_parameterization == "joint_delta" else ()
-    )
+    dims = normalize_dims(absolute_action_dims, action_dim) if action_parameterization != "absolute" else ()
+    if action_parameterization == "joint_relative" and state_dim != action_dim:
+        raise ValueError(
+            f"relative actions need matching state and action widths, got {state_dim} and {action_dim}"
+        )
+    chunk_size = int(manifest["chunk_size"])
     states, targets, frames = [], [], 0
     for episode in manifest["episodes"]:
         start, n = episode["from_index"], episode["n_frames"]
@@ -627,7 +653,14 @@ def build_statistics(
         if not np.isfinite(block).all():
             raise ValueError(f"episode {episode['episode_id']}: rows missing from the rows array")
         states.append(block[:, :state_dim])
-        targets.append(action_targets(block[:, state_dim:], action_parameterization, dims))
+        if action_parameterization == "joint_relative":
+            spans = valid_window_spans(n, episode["valid_ranges"], chunk_size)
+            starts = [s for first, count in spans for s in range(first, first + count)]
+            targets.append(
+                relative_window_targets(block[:, :state_dim], block[:, state_dim:], starts, chunk_size, dims)
+            )
+        else:
+            targets.append(action_targets(block[:, state_dim:], action_parameterization, dims))
         frames += n
     if not targets:
         raise ValueError("no episodes to compute statistics from")

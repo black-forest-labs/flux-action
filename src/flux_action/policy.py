@@ -66,6 +66,36 @@ def _released_inference_config(config: PolicyConfig) -> bool:
     )
 
 
+def _prepared_bf16_dims(config: PolicyConfig):
+    """Sizes for the prepared BF16 backend, or ``None`` when the checkpoint's architecture needs features
+    it does not implement (late blocks, gates, QKV bias, extra content streams) or it is not BF16."""
+    from .models.transformer_inf_bf16 import Dims
+
+    params = JointSingleSeqParams(**{**config.dit_config, "attn_mode": config.attn_mode})
+    supported = (
+        config.torch_dtype == "bfloat16"
+        and tuple(config.content_streams or REQUIRED_CONTENT_STREAMS) == REQUIRED_CONTENT_STREAMS
+        and params.depth_late_blocks == 0
+        and params.gate_type is None
+        and not params.qkv_bias
+        and params.vec_in_dim is not None
+        and len(params.axes_dim) == 4
+    )
+    if not supported:
+        return None
+    return Dims(
+        hidden_size=params.hidden_size,
+        num_heads=params.num_heads,
+        mlp_size=int(params.hidden_size * params.mlp_ratio),
+        early_depth=params.depth,
+        joint_depth=params.depth_single_blocks,
+        context_dim=params.context_in_dim,
+        vector_dim=params.vec_in_dim,
+        axes_dim=tuple(params.axes_dim),
+        theta=params.theta,
+    )
+
+
 def _verify_policy_manifest(directory: Path, config_name: str) -> None:
     path = directory / "manifest.json"
     if not path.is_file():
@@ -154,6 +184,7 @@ class PreparedWindows:
     state: Tensor  # (n, D), gripper-flipped and normalized
     actions: Tensor  # (n, chunk, D), gripper-flipped targets (absolute or deltas), normalized
     action_mask: Tensor | None = None  # (n, D) 1/0 per action dim; None = all dims trained (see flow_loss)
+    action_prefix_lengths: Tensor | None = None  # (n,) clean RTC prefix per window; None = no RTC
     event: Any = None
 
     def tensors(self):
@@ -163,6 +194,8 @@ class PreparedWindows:
         yield self.actions
         if self.action_mask is not None:
             yield self.action_mask
+        if self.action_prefix_lengths is not None:
+            yield self.action_prefix_lengths
 
 
 class FluxActionPolicy(nn.Module):
@@ -261,7 +294,7 @@ class FluxActionPolicy(nn.Module):
         return policy.to(target).eval()
 
     def prepare_inference(self, *, compile: bool = True) -> bool:
-        """Install the prepared DROID backend and compile the DiT and VAE encoder.
+        """Install the prepared BF16 backend and compile the DiT and VAE encoder.
 
         BF16 policies stay trainable and saveable until this explicit operation.
         Native FP8r policies already own their prepared weights and only need
@@ -270,13 +303,14 @@ class FluxActionPolicy(nn.Module):
         # Older packages explicitly disable this; serving encodes only the observed frame.
         self.config.single_frame_encode = True
         if isinstance(self.dit, JointSingleSeq):
-            if not _released_inference_config(self.config) or self.device.type not in ("cuda", "xpu"):
+            dims = _prepared_bf16_dims(self.config)
+            if dims is None or self.device.type not in ("cuda", "xpu"):
                 return False
             from .models.transformer_inf_bf16 import BF16InferenceDiT
 
-            self.dit = BF16InferenceDiT.from_state_dict(self.dit.state_dict())
+            self.dit = BF16InferenceDiT.from_state_dict(self.dit.state_dict(), dims)
             self.reset()
-        else:
+        elif self.config.quantization == "fp8r":
             assert _released_inference_config(self.config), (
                 "prepared backend requires released DROID geometry"
             )
@@ -413,14 +447,15 @@ class FluxActionPolicy(nn.Module):
             assert (img.is_floating_point() or img.dtype == torch.uint8) and img.shape[2] == 3, (
                 "invalid camera tensor"
             )
-            assert layout != "droid" or tuple(img.shape[-2:]) == (360, 640), "invalid DROID frame"
             cams.append(img)
-        if len({tuple(c.shape) for c in cams}) != 1:
-            same_btc = len({tuple(c.shape[:3]) for c in cams}) == 1
-            assert layout == "grid" and same_btc, "incompatible camera shapes"
-            # the grid layout takes mixed resolutions: every camera is resized to the largest one first
+        assert len({tuple(c.shape[:3]) for c in cams}) == 1, "incompatible camera shapes"
+        if layout == "droid":
+            # The DROID canvas places 360x640 cameras; other resolutions are resized to that first.
+            hw = packing.CAMERA_HW
+        else:
+            # Mixed resolutions: every camera is resized to the largest one, so one augmentation draw fits all.
             hw = (max(c.shape[-2] for c in cams), max(c.shape[-1] for c in cams))
-            cams = [self._resize_camera(c, hw) for c in cams]
+        cams = [c if tuple(c.shape[-2:]) == hw else self._resize_camera(c, hw) for c in cams]
         return torch.stack(cams, dim=1)
 
     @staticmethod
@@ -447,12 +482,16 @@ class FluxActionPolicy(nn.Module):
         return normalization.normalize(state, self.config.state_normalization, self.config.normalization_clip)
 
     def _action_targets(self, actions: Tensor, previous: Tensor | None) -> Tensor:
-        """Flipped commands ``(B, K, D)`` -> normalized training targets: the commands themselves, or their
-        per-frame deltas from ``previous`` (the command before the window) under ``joint_delta``."""
+        """Flipped commands ``(B, K, D)`` -> normalized training targets: the commands themselves, their
+        per-frame deltas from ``previous`` (the command before the window) under ``joint_delta``, or their
+        offsets from ``previous`` (the measured state at request time) under ``joint_relative``."""
         cfg = self.config
         if cfg.action_parameterization == "joint_delta":
             assert previous is not None, "joint deltas require action_prev"
             actions = normalization.deltas(actions, self._flip(previous.float()), cfg.absolute_action_dims)
+        elif cfg.action_parameterization == "joint_relative":
+            assert previous is not None, "relative actions require the measured state"
+            actions = normalization.relative(actions, self._flip(previous.float()), cfg.absolute_action_dims)
         return normalization.normalize(actions, cfg.action_normalization, cfg.normalization_clip)
 
     def _targets_to_actions(self, targets: Tensor, state: Tensor) -> Tensor:
@@ -462,7 +501,19 @@ class FluxActionPolicy(nn.Module):
         targets = normalization.denormalize(targets, cfg.action_normalization)
         if cfg.action_parameterization == "joint_delta":
             targets = normalization.integrate(targets, state, cfg.absolute_action_dims)
+        elif cfg.action_parameterization == "joint_relative":
+            targets = normalization.from_relative(targets, state, cfg.absolute_action_dims)
         return targets
+
+    def _action_reference(self, batch: dict[str, Any]) -> Tensor | None:
+        """What a window's targets are taken against: the measured state at request time under
+        ``joint_relative``, else the command before the window (``joint_delta``; unused when absolute)."""
+        if self.config.action_parameterization == "joint_relative":
+            state = batch[OBS_STATE]
+            return state[:, -1] if state.ndim == 3 else state
+        if self.config.inference_profile == "history":
+            return batch["command_history"][:, -1]
+        return batch.get(ACTION_PREV)
 
     @staticmethod
     def _captions(batch: dict[str, Any], batch_size: int) -> list[str]:
@@ -579,10 +630,8 @@ class FluxActionPolicy(nn.Module):
             if commands is None:
                 raise ValueError("history training requires absolute command_history")
             state = history.conditioning_values(batch["state"], commands, cfg)
-            previous = commands[:, -1]
         else:
             state = self._normalize_state(self._flip(self._state(batch)))
-            previous = batch.get(ACTION_PREV)
         if state.shape[0] != b:
             raise ValueError("state and cameras must have the same batch size")
         state = state.to(device, non_blocking=True)
@@ -591,7 +640,7 @@ class FluxActionPolicy(nn.Module):
             raise ValueError(
                 f"actions must be (B, {cfg.chunk_size}, {cfg.action_dim}), got {tuple(actions.shape)}"
             )
-        actions = self._action_targets(actions, previous).to(device, non_blocking=True)
+        actions = self._action_targets(actions, self._action_reference(batch)).to(device, non_blocking=True)
         keep = self._valid_windows(batch, b, device)
         captions = self._captions(batch, b)
         generators = self._window_generators(batch, b)
@@ -626,7 +675,55 @@ class FluxActionPolicy(nn.Module):
         mask = batch.get("action_mask")
         if mask is not None:
             mask = torch.as_tensor(mask, dtype=torch.float32)[idx_keep].to(device, non_blocking=True)
-        return PreparedWindows(idx_keep, latents, ctxs, state[idx_keep], actions[idx_keep], mask)
+        prefixes = self._rtc_prefix_lengths(batch, b)
+        if prefixes is not None:
+            prefixes = prefixes[idx_keep].to(device, non_blocking=True)
+        return PreparedWindows(
+            idx_keep,
+            latents,
+            ctxs,
+            state[idx_keep],
+            actions[idx_keep],
+            mask,
+            action_prefix_lengths=prefixes,
+        )
+
+    def _rtc_prefix_lengths(self, batch: dict[str, Any], batch_size: int) -> Tensor | None:
+        """Per-window RTC prefix lengths ``(B,)``: ``rtc_prefix_lengths`` from the batch when given, else drawn
+        uniformly from ``[0, rtc_max_prefix]`` while training (seeded by ``window_seed``, apart from the
+        augmentation draws) and the full ``rtc_max_prefix`` in eval. ``None`` without RTC."""
+        cfg = self.config
+        explicit = batch.get("rtc_prefix_lengths")
+        if not cfg.rtc_max_prefix:
+            if explicit is not None:
+                raise ValueError("rtc_prefix_lengths given to a policy without rtc_max_prefix")
+            return None
+        if explicit is not None:
+            prefixes = torch.as_tensor(explicit)
+            if prefixes.shape != (batch_size,) or prefixes.is_floating_point():
+                raise ValueError("rtc_prefix_lengths must be an integer vector of batch size")
+            if (prefixes < 0).any() or (prefixes > cfg.rtc_max_prefix).any():
+                raise ValueError("rtc_prefix_lengths must lie in [0, rtc_max_prefix]")
+            return prefixes.long()
+        if not self.training:
+            return torch.full((batch_size,), cfg.rtc_max_prefix, dtype=torch.long)
+        seeds = batch.get(WINDOW_SEED)
+        seeds = (
+            [None] * batch_size if seeds is None else (seeds.tolist() if isinstance(seeds, Tensor) else seeds)
+        )
+        return torch.tensor(
+            [
+                int(
+                    torch.randint(
+                        cfg.rtc_max_prefix + 1,
+                        (),
+                        generator=None if s is None else torch.Generator().manual_seed(int(s) ^ 0x525443),
+                    )
+                )
+                for s in seeds
+            ],
+            dtype=torch.long,
+        )
 
     def forward(
         self, batch: dict[str, Any], prepared: PreparedWindows | None = None
@@ -671,6 +768,7 @@ class FluxActionPolicy(nn.Module):
             self.modality,
             action_timesteps=action_timesteps,
             conditioning_noise_max=cfg.conditioning_noise_max if self.training else 0.0,
+            action_prefix_lengths=prepared.action_prefix_lengths,
         )
         # All windows of the micro-batch go through ONE DiT forward: they are packed into a single
         # sequence whose attention stays within each window (``seqlens``), so captions of different
@@ -687,6 +785,12 @@ class FluxActionPolicy(nn.Module):
             action_mask=prepared.action_mask,
             reduction=cfg.loss_reduction,
             channel_weights=cfg.action_channel_weights,
+            action_token_mask=(
+                None
+                if prepared.action_prefix_lengths is None
+                else torch.arange(cfg.chunk_size, device=prepared.actions.device)[None]
+                >= prepared.action_prefix_lengths[:, None]
+            ),
         )
         # the MSEs stay on the device (detached): a float() here would wait for the forward and delay
         # the launch of the next micro-batch's encoders
@@ -741,9 +845,7 @@ class FluxActionPolicy(nn.Module):
                     for i in idx[start : start + cfg.vae_batch_windows]
                 ]
             )  # (nb, 3, T, Hc, Wc)
-            with torch.autocast(
-                device.type, dtype=torch.bfloat16, enabled=device.type in ("cuda", "xpu")
-            ):
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type in ("cuda", "xpu")):
                 latents.append(
                     history.encode_windows(self.video_vae, videos, cfg)
                     if cfg.inference_profile == "history"
@@ -785,8 +887,13 @@ class FluxActionPolicy(nn.Module):
         }
 
     @torch.no_grad()
-    def _sample(self, cond: dict[str, Tensor], caption: str, seed: int) -> Tensor:
-        """Joint video + action denoising from pure noise -> ``(chunk, D)`` in model units / action_scale."""
+    def _sample(
+        self, cond: dict[str, Tensor], caption: str, seed: int, prefix_targets: Tensor | None = None
+    ) -> Tensor:
+        """Joint video + action denoising from pure noise -> ``(chunk, D)`` in model units / action_scale.
+
+        ``prefix_targets`` ``(P, D)`` (RTC): normalized targets of the committed commands. They stay clean at
+        timestep 0 in every step, as in training, and are returned unchanged as the first ``P`` targets."""
         cfg, m, mdt = self.config, self.modality, self.dtype_
         ak, ck = f"x_{m}", f"x_{m}_cond"
         device = cond["x_video_cond"].device
@@ -817,6 +924,10 @@ class FluxActionPolicy(nn.Module):
         # The solver state stays fp32 (scaled joint targets would lose ~0.01 rad per bf16 round trip);
         # inputs are cast at the model boundary.
         flow = {"x_video": x_video.to(device), ak: x_action.to(device)}
+        n_prefix = 0 if prefix_targets is None else prefix_targets.shape[0]
+        if n_prefix:
+            committed = prefix_targets.to(device).float()[None] * cfg.action_scale
+            flow[ak][:, :n_prefix] = committed
         fixed = {
             "x_video_ids": x_video_ids.to(device),
             f"{ak}_ids": x_action_ids.to(device),
@@ -836,17 +947,19 @@ class FluxActionPolicy(nn.Module):
         ctx_uc = self._context("", device) if any(g != 1.0 for g in guidance.values()) else None
 
         if self._inference_prepared:
-            return (
-                self._sample_prepared(
-                    flow=flow,
-                    fixed=fixed,
-                    caption=caption,
-                    ctx_c=ctx_c,
-                    ctx_uc=ctx_uc,
-                    guidance=guidance,
-                )[ak][0].float()
-                / cfg.action_scale
+            out = self._sample_prepared(
+                flow=flow,
+                fixed=fixed,
+                caption=caption,
+                ctx_c=ctx_c,
+                ctx_uc=ctx_uc,
+                guidance=guidance,
+                committed=committed if n_prefix else None,
             )
+            result = out[ak][0].float() / cfg.action_scale
+            if n_prefix:
+                result[:n_prefix] = prefix_targets.to(result)
+            return result
 
         assert isinstance(self.dit, JointSingleSeq), "call prepare_inference before prediction"
 
@@ -857,6 +970,10 @@ class FluxActionPolicy(nn.Module):
                 f"{ak}_timesteps": torch.full((1, cfg.chunk_size), t, device=device),
             }
             model_in = {k: v.to(mdt) for k, v in samples.items()}
+            if n_prefix:
+                model_in[ak] = model_in[ak].clone()  # .to() is a no-op in fp32: keep the solver state intact
+                model_in[ak][:, :n_prefix] = committed.to(mdt)
+                timesteps[f"{ak}_timesteps"][:, :n_prefix] = 0.0
             if ctx_uc is None:  # guidance 1.0 on every stream: a single conditional pass
                 ctx, ctx_ids = ctx_c
                 pred = self.dit(
@@ -870,7 +987,10 @@ class FluxActionPolicy(nn.Module):
                 pred = {k: pred[k] for k in model_in}
             else:
                 pred = sampling.cfg_two_pass(self.dit, model_in, fixed, timesteps, ctx_uc, ctx_c, guidance)
-            return {k: v.float() for k, v in pred.items()}
+            pred = {k: v.float() for k, v in pred.items()}
+            if n_prefix:
+                pred[ak][:, :n_prefix] = 0.0  # no velocity: the committed tokens stay where they are
+            return pred
 
         if cfg.sampler == "cosmos_unipc":
             out = sampling.cosmos_unipc_order2(
@@ -878,7 +998,10 @@ class FluxActionPolicy(nn.Module):
             )
         else:
             out = sampling.euler(flow, predict, n_steps=cfg.num_inference_steps, alpha=cfg.sampler_shift)
-        return out[ak][0].float() / cfg.action_scale
+        result = out[ak][0].float() / cfg.action_scale
+        if n_prefix:
+            result[:n_prefix] = prefix_targets.to(result)
+        return result
 
     def _prepared_text(self, caption: str, ctx: tuple[Tensor, Tensor], vector: Tensor):
         cached = self._prepared_text_cache.get(caption)
@@ -896,8 +1019,10 @@ class FluxActionPolicy(nn.Module):
         ctx_c: tuple[Tensor, Tensor],
         ctx_uc: tuple[Tensor, Tensor] | None,
         guidance: dict[str, float],
+        committed: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """Run the existing solver over an optimized prepared DROID DiT."""
+        """Run the configured solver over the prepared BF16 or FP8r DiT. ``committed`` ``(1, P, D)`` (RTC, in
+        model units): the first ``P`` action tokens stay clean at timestep 0, as on the reference path."""
         cfg, model = self.config, self.dit
         action_key = f"x_{self.modality}"
         cond_key = f"{action_key}_cond"
@@ -917,9 +1042,24 @@ class FluxActionPolicy(nn.Module):
 
         request = prepare(caption, ctx_c)
         negative_request = prepare("", ctx_uc) if ctx_uc is not None else None
-        _, ticks = sampling.cosmos_unipc_schedule(cfg.num_inference_steps, cfg.sampler_shift)
-        times = ticks.to(device=self.device, dtype=torch.float32) / 1000.0
-        steps = model.prepare_steps(request, times, times)
+        if cfg.sampler == "cosmos_unipc":
+            _, ticks = sampling.cosmos_unipc_schedule(cfg.num_inference_steps, cfg.sampler_shift)
+            # Divide on the device: CUDA scalar division rounds differently from CPU, and released DROID
+            # outputs are pinned to this exact expression.
+            times = ticks.to(device=self.device, dtype=torch.float32) / 1000.0
+        else:
+            # The reference path's Euler times (CPU float32), so both paths condition on identical values.
+            grid = torch.linspace(1.0, 0.0, cfg.num_inference_steps + 1)
+            times = sampling.timeshift(cfg.sampler_shift, grid)[:-1].float().to(self.device)
+        n_prefix = 0 if committed is None else committed.shape[1]
+        if n_prefix:
+            if self.config.quantization == "fp8r":
+                raise ValueError(
+                    "committed actions are not supported by the FP8r backend; load the BF16 weights"
+                )
+            steps = model.prepare_steps(request, times, times, action_prefix=n_prefix)
+        else:
+            steps = model.prepare_steps(request, times, times)
         phase = 0
 
         def predict(samples: dict[str, Tensor], _t) -> dict[str, Tensor]:
@@ -928,6 +1068,8 @@ class FluxActionPolicy(nn.Module):
                 "video": samples["x_video"].to(torch.bfloat16),
                 "action": samples[action_key].to(torch.bfloat16),
             }
+            if n_prefix:
+                inputs["action"][:, :n_prefix] = committed.to(torch.bfloat16)
             if negative_request is None:
                 result = model.forward_prepared(request, steps[phase], **inputs).as_dict()
             else:
@@ -937,35 +1079,41 @@ class FluxActionPolicy(nn.Module):
                     key: negative[key] + guidance[key] * (positive[key] - negative[key]) for key in flow
                 }
             phase += 1
-            return {key: value.float() for key, value in result.items()}
+            result = {key: value.float() for key, value in result.items()}
+            if n_prefix:
+                result[action_key][:, :n_prefix] = (
+                    0.0  # no velocity: the committed tokens stay where they are
+                )
+            return result
 
-        return sampling.cosmos_unipc_order2(
-            flow,
-            predict,
-            n_steps=cfg.num_inference_steps,
-            shift=cfg.sampler_shift,
-        )
+        if cfg.sampler == "cosmos_unipc":
+            return sampling.cosmos_unipc_order2(
+                flow, predict, n_steps=cfg.num_inference_steps, shift=cfg.sampler_shift
+            )
+        return sampling.euler(flow, predict, n_steps=cfg.num_inference_steps, alpha=cfg.sampler_shift)
 
     @torch.no_grad()
     def training_targets(self, batch: dict[str, Any]) -> Tensor:
         """The normalized targets a training window carries, ``(B, chunk_size, action_dim)``: flip, deltas from
-        ``action_prev`` under ``joint_delta``, range normalization. Comparable to :meth:`predict_normalized_targets`."""
+        ``action_prev`` under ``joint_delta`` or offsets from the measured state under ``joint_relative``, range
+        normalization. Comparable to :meth:`predict_normalized_targets`."""
         cfg = self.config
         actions = self._flip(batch[ACTION].float())
         if actions.ndim != 3 or actions.shape[1:] != (cfg.chunk_size, cfg.action_dim):
             raise ValueError(
                 f"actions must be (B, {cfg.chunk_size}, {cfg.action_dim}), got {tuple(actions.shape)}"
             )
-        previous = (
-            batch["command_history"][:, -1] if cfg.inference_profile == "history" else batch.get(ACTION_PREV)
-        )
-        return self._action_targets(actions, previous)
+        return self._action_targets(actions, self._action_reference(batch))
 
     @torch.no_grad()
-    def predict_normalized_targets(self, batch: dict[str, Any]) -> Tensor:
+    def predict_normalized_targets(
+        self, batch: dict[str, Any], *, committed_actions: Tensor | None = None
+    ) -> Tensor:
         """Observation batch -> ``(B, chunk_size, action_dim)`` predicted targets in the trained action space:
-        normalized, deltas under ``joint_delta``, before denormalization and integration."""
+        normalized, deltas under ``joint_delta`` or offsets under ``joint_relative``, before denormalization and
+        integration. ``committed_actions``: see :meth:`predict_action_chunk`."""
         self.config.validate_inference()
+        prefixes = self._committed_targets(batch, committed_actions)
         if self._inference_prepared and self.dit._compiled_hot is not None and self.device.type == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
         if self.training:
@@ -985,6 +1133,7 @@ class FluxActionPolicy(nn.Module):
                         ),
                         caption,
                         self.config.inference_seed,
+                        None if prefixes is None else prefixes[i],
                     )
                     for i, caption in enumerate(self._captions(batch, state.shape[0]))
                 ]
@@ -998,8 +1147,36 @@ class FluxActionPolicy(nn.Module):
         targets = []
         for i in range(b):
             cond = self._encode_observation(cams[i], token[i : i + 1])
-            targets.append(self._sample(cond, captions[i], self.config.inference_seed))
+            prefix = None if prefixes is None else prefixes[i]
+            targets.append(self._sample(cond, captions[i], self.config.inference_seed, prefix))
         return torch.stack(targets)
+
+    def _committed_targets(self, batch: dict[str, Any], committed_actions: Tensor | None) -> Tensor | None:
+        """Committed commands ``(B, P, D)`` in dataset units -> their normalized targets, or ``None``."""
+        if committed_actions is None:
+            return None
+        cfg = self.config
+        if not cfg.rtc_max_prefix:
+            raise ValueError("committed_actions require a policy trained with rtc_max_prefix > 0")
+        b = batch[OBS_STATE].shape[0]
+        if (
+            committed_actions.ndim != 3
+            or committed_actions.shape[0] != b
+            or committed_actions.shape[2] != cfg.action_dim
+            or committed_actions.shape[1] > cfg.rtc_max_prefix
+            or not torch.isfinite(committed_actions).all()
+        ):
+            raise ValueError(
+                f"committed_actions must be finite commands (B, P <= {cfg.rtc_max_prefix}, {cfg.action_dim})"
+            )
+        if committed_actions.shape[1] == 0:
+            return None
+        if cfg.inference_profile == "history":
+            batch = history.observation_window(batch, cfg)
+        reference = self._action_reference(batch)
+        if reference is not None:
+            reference = reference.to(committed_actions.device)
+        return self._action_targets(self._flip(committed_actions.float()), reference)
 
     @torch.no_grad()
     def actions_from_targets(self, targets: Tensor, state: Tensor) -> Tensor:
@@ -1010,20 +1187,33 @@ class FluxActionPolicy(nn.Module):
         return self._flip(torch.stack(chunks)).float()
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Any], **kwargs: Any) -> Tensor:
+    def predict_action_chunk(
+        self, batch: dict[str, Any], *, committed_actions: Tensor | None = None, **kwargs: Any
+    ) -> Tensor:
         """Observation batch -> ``(B, chunk_size, action_dim)`` absolute commands in the dataset's action units.
 
         Normalization is undone and, under ``joint_delta``, the predicted deltas are integrated onto the
-        observed state, so the result is what the dataset's action column holds (gripper as stored).
+        observed state (under ``joint_relative``, added to the measured state at request time), so the result
+        is what the dataset's action column holds (gripper as stored).
+
+        ``committed_actions`` ``(B, P, action_dim)``, ``P <= rtc_max_prefix``: commands already sent to the robot
+        that the new chunk must start with (real-time chunking), in the same units. They come back unchanged as
+        the first ``P`` commands; the rest of the chunk is predicted to continue them. Requires a policy trained
+        with ``rtc_max_prefix > 0``.
         """
         if kwargs:
-            raise NotImplementedError("FLUX Action does not implement RTC inference arguments yet")
+            raise NotImplementedError(f"unsupported inference arguments: {sorted(kwargs)}")
         if self.config.inference_profile == "history":
             batch = history.observation_window(batch, self.config)
-            targets = self.predict_normalized_targets(batch)
-            return self.actions_from_targets(targets, batch["command_history"][:, -1])
-        targets = self.predict_normalized_targets(batch)
-        return self.actions_from_targets(targets, self._state(batch))
+            reference = self._action_reference(batch)
+        else:
+            reference = self._state(batch)
+        rtc = {} if committed_actions is None else {"committed_actions": committed_actions}
+        targets = self.predict_normalized_targets(batch, **rtc)
+        actions = self.actions_from_targets(targets, reference)
+        if committed_actions is not None and committed_actions.shape[1]:
+            actions[:, : committed_actions.shape[1]] = committed_actions.to(actions)
+        return actions
 
     @torch.no_grad()
     def predict_from_composite(
@@ -1065,11 +1255,24 @@ class FluxActionPolicy(nn.Module):
         ``joint_delta`` policy continues from its last returned command, initially the observed state).
 
         Reset between episodes or interventions. Measured state still conditions every new prediction.
+        With ``rtc_overlap`` > 0 the next chunk is predicted while that many commands are still queued, and
+        they are committed as its start (see :meth:`predict_action_chunk`), so consecutive chunks join
+        without a jump. The call that predicts blocks; to keep the robot moving during prediction, call
+        :meth:`predict_action_chunk` from your own control loop instead.
         """
         if kwargs:
-            raise NotImplementedError("FLUX Action does not implement RTC inference arguments yet")
+            raise NotImplementedError(
+                "select_action runs open loop; for real-time chunking pass committed_actions to predict_action_chunk"
+            )
         if self.config.inference_profile == "history":
             window = self._observation_history.append(batch, self.config, self._last_command)
+            if self.config.action_parameterization == "joint_relative" or self.config.rtc_overlap:
+                # The whole chunk is anchored at the request's measured state, not stepped from the last command.
+                if len(self._action_queue) <= self.config.rtc_overlap:
+                    self._refill_action_queue(window)
+                action = self._action_queue.popleft()
+                self._last_command = action.detach().clone()
+                return action
             if not self._action_queue:
                 targets = self.predict_normalized_targets(window)[:, : self.config.n_action_steps]
                 self._action_queue.extend(targets.transpose(0, 1))
@@ -1077,15 +1280,24 @@ class FluxActionPolicy(nn.Module):
             action = self.actions_from_targets(target[:, None], window["command_history"][:, -1])[:, 0]
             self._last_command = action.detach().clone()
             return action
-        if len(self._action_queue) == 0:
+        if len(self._action_queue) <= self.config.rtc_overlap:
             if self.config.action_parameterization == "joint_delta":
                 targets = self.predict_normalized_targets(batch)
                 anchor = self._state(batch) if self._last_command is None else self._last_command
                 actions = self.actions_from_targets(targets, anchor)
+                self._action_queue.extend(actions[:, : self.config.n_action_steps].transpose(0, 1))
             else:
-                actions = self.predict_action_chunk(batch)
-            self._action_queue.extend(actions[:, : self.config.n_action_steps].transpose(0, 1))
+                self._refill_action_queue(batch)
         action = self._action_queue.popleft()
         if self.config.action_parameterization == "joint_delta":
             self._last_command = action.detach().clone()
         return action
+
+    def _refill_action_queue(self, batch: dict[str, Any]) -> None:
+        """Predict the next chunk of absolute commands into the queue; commands still queued (``rtc_overlap``)
+        are committed as its start and come back unchanged."""
+        committed = torch.stack(list(self._action_queue), dim=1) if self._action_queue else None
+        rtc = {} if committed is None else {"committed_actions": committed}
+        actions = self.predict_action_chunk(batch, **rtc)[:, : self.config.n_action_steps]
+        self._action_queue.clear()
+        self._action_queue.extend(actions.transpose(0, 1))

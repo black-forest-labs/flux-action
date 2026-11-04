@@ -119,13 +119,15 @@ def main():
     lerobot.add_argument(
         "--action-parameterization",
         default="joint_delta",
-        choices=("absolute", "joint_delta"),
-        help="targets the statistics describe: the commands, or per-frame deltas (the SO-101 recipe)",
+        choices=("absolute", "joint_delta", "joint_relative"),
+        help="targets the statistics describe: the commands, per-frame deltas (the SO-101 recipe), or commands "
+        "minus the measured state at each window's start",
     )
     lerobot.add_argument(
         "--absolute-action-dims",
         default="-1",
-        help="comma-separated channels kept absolute under joint_delta (default: the last, the gripper); "
+        help="comma-separated channels kept absolute under joint_delta / joint_relative (default: the last, the "
+        "gripper); "
         "'' for none",
     )
     lerobot.add_argument("--normalization-clip", type=float, default=6.0)
@@ -273,7 +275,7 @@ def main():
             args.output_dir,
             cameras,
             action_parameterization=args.action_parameterization,
-            absolute_action_dims=dims if args.action_parameterization == "joint_delta" else (),
+            absolute_action_dims=dims if args.action_parameterization != "absolute" else (),
             clip=args.normalization_clip,
             strip_dead_windows=args.strip_dead_windows,
             state_key=args.state_key,

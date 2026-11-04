@@ -25,7 +25,7 @@ from .processing import packing
 # so a trunk without the image and audio streams predicts identical actions.
 CONTENT_STREAMS = ("video", "video_cond", "image", "image_cond", "audio", "audio_cond")
 REQUIRED_CONTENT_STREAMS = ("video", "video_cond")
-ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta")
+ACTION_PARAMETERIZATIONS = ("absolute", "joint_delta", "joint_relative")
 
 # Inference settings the selected DROID checkpoint was chosen and benchmarked with: Cosmos UniPC,
 # four denoising steps, inference timestep shift 5 (distinct from the training shift 42), guidance
@@ -63,14 +63,28 @@ class PolicyConfig:
     # stored (DROID). "joint_delta": per-frame differences a[t] - a[t-1] on every channel except
     # absolute_action_dims, which stay absolute (SO-101: the gripper); a training window then needs the
     # command before its first one (``action_prev`` in the batch), and inference integrates the predicted
-    # deltas onto the observed state (target[k] = state + sum(delta[:k + 1])), open loop.
+    # deltas onto the observed state (target[k] = state + sum(delta[:k + 1])), open loop. "joint_relative": every
+    # command of the chunk minus the measured state at request time (the last observed state), again except
+    # absolute_action_dims; inference adds the predicted targets back onto that one state, without integration.
     action_parameterization: str = "absolute"
     absolute_action_dims: tuple[int, ...] = ()
+    # Committed-prefix training for real-time chunking (RTC). Each training window draws a prefix length P
+    # uniformly from [0, rtc_max_prefix]; its first P action tokens carry the clean targets at timestep 0 and
+    # get no loss. Inference can then pin up to rtc_max_prefix commands that are already sent to the robot
+    # (``committed_actions``) and predict a chunk that continues them. 0 = off. Not for joint_delta, whose
+    # targets chain from one frame to the next.
+    rtc_max_prefix: int = 0
+    # select_action with RTC: predict the next chunk when this many commands are still queued and commit them
+    # as its start, so chunks join without a jump. 0 = predict only when the queue is empty. At most
+    # rtc_max_prefix and below n_action_steps. The robot waits during the prediction.
+    rtc_overlap: int = 0
     # Range normalization of the action targets and of the state token, per channel:
     # x_norm = clip(2 (x - q01) / span - 1, -normalization_clip, normalization_clip) with span = q99 - q01, or 1
     # where that is at most 1e-6. {"q01": [...], "q99": [...]} with action_dim entries each, or None for the
     # identity (DROID radians and closed fractions need none). ``flux-action index-lerobot`` computes them; the
     # trainer fills empty fields from the index and refuses bounds that disagree with it. Exports carry them.
+    # {"mean": [...], "std": [...]} is accepted too and stored as q01 = mean - std, q99 = mean + std, which
+    # makes x_norm = (x - mean) / std.
     action_normalization: dict[str, list[float]] | None = None
     state_normalization: dict[str, list[float]] | None = None
     normalization_clip: float = 6.0
@@ -206,6 +220,11 @@ class PolicyConfig:
             "invalid chunk size"
         )
         assert 1 <= self.n_action_steps <= self.chunk_size, "invalid action step count"
+        if not isinstance(self.rtc_max_prefix, int) or not 0 <= self.rtc_max_prefix < self.chunk_size:
+            raise ValueError("rtc_max_prefix must be an integer in [0, chunk_size)")
+        if self.rtc_max_prefix and self.action_parameterization == "joint_delta":
+            raise ValueError("RTC prefixes require absolute or joint_relative actions")
+        self._validate_rtc_overlap()
         assert all(math.isfinite(x) and x > 0 for x in (self.fps, self.action_scale)), "invalid action timing"
         assert all(-self.action_dim <= d < self.action_dim for d in self.gripper_flip_dims), (
             "invalid gripper dimension"
@@ -224,7 +243,7 @@ class PolicyConfig:
         assert self.action_parameterization != "absolute" or not self.absolute_action_dims, (
             "absolute actions cannot mix delta dimensions"
         )
-        if self.action_parameterization == "joint_delta":
+        if self.action_parameterization in ("joint_delta", "joint_relative"):
             absolute = {d % self.action_dim for d in self.absolute_action_dims}
             assert all(d % self.action_dim in absolute for d in self.gripper_flip_dims), (
                 "gripper dimensions must stay absolute"
@@ -233,7 +252,15 @@ class PolicyConfig:
             value = getattr(self, name)
             if value is None:
                 continue
-            assert set(value) == {"q01", "q99"}, "normalization requires q01 and q99"
+            if set(value) == {"mean", "std"}:
+                mean, std = (list(map(float, value[k])) for k in ("mean", "std"))
+                assert len(mean) == len(std), "normalization width mismatch"
+                assert all(sd > 0 for sd in std), "normalization std must be positive"
+                value = {
+                    "q01": [m - sd for m, sd in zip(mean, std, strict=True)],
+                    "q99": [m + sd for m, sd in zip(mean, std, strict=True)],
+                }
+            assert set(value) == {"q01", "q99"}, "normalization requires q01 and q99, or mean and std"
             q01, q99 = (list(map(float, value[k])) for k in ("q01", "q99"))
             assert len(q01) == len(q99) == self.action_dim, "normalization width mismatch"
             assert all(math.isfinite(x) for x in q01 + q99), "nonfinite normalization bound"
@@ -272,6 +299,14 @@ class PolicyConfig:
         assert self.guidance_scale_action is None or math.isfinite(self.guidance_scale_action), (
             "invalid action guidance"
         )
+        self._validate_rtc_overlap()
+
+    def _validate_rtc_overlap(self):
+        # an inference setting: checked again before prediction, since callers may change it after loading
+        if not isinstance(self.rtc_overlap, int) or not 0 <= self.rtc_overlap <= self.rtc_max_prefix:
+            raise ValueError("rtc_overlap must be an integer in [0, rtc_max_prefix]")
+        if self.rtc_overlap >= self.n_action_steps:
+            raise ValueError("rtc_overlap must be smaller than n_action_steps")
 
     @property
     def conditioning_channels(self) -> int:

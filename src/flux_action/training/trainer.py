@@ -59,6 +59,7 @@ from .checkpoint import (
     resume_seed,
     save_checkpoint,
     seed_everything,
+    slim_checkpoints,
 )
 from .data import DataPosition, WindowDataset, build_dataloader, load_manifest, manifest_dims
 from .distributed import (
@@ -125,9 +126,10 @@ class TrainConfig:
     eps: float = 1e-8
     weight_decay: float = 0.05
     fused_optimizer: bool = True
-    # Global gradient-norm clipping (torch.nn.utils.clip_grad_norm_ semantics, over all ranks). None = off,
-    # the DROID recipe; the SO-101 recipe clips at 1.0. The logged grad_norm is the norm before clipping.
-    max_grad_norm: float | None = None
+    # Global gradient-norm clipping (torch.nn.utils.clip_grad_norm_ semantics, over all ranks). On by default:
+    # full fine-tunes of new embodiments can diverge without it. None = off, as the DROID recipe pins it.
+    # The logged grad_norm is the norm before clipping.
+    max_grad_norm: float | None = 1.0
     # Windows drawn per episode per epoch. One (DROID) means an epoch is one window per episode, so a small
     # dataset cannot fill an update: ranks x num_workers x windows_per_rank x grad_accumulation windows are
     # needed per epoch. The SO-101 corpus builder took up to 35 windows per episode; several visits draw
@@ -141,6 +143,9 @@ class TrainConfig:
     # step (None keeps everything, as the source run did). A checkpoint is 4x the fp32 model size.
     keep_checkpoints: int | None = None
     keep_every: int | None = 5000
+    # With keep_checkpoints set, checkpoints older than the newest keep_checkpoints also drop their optimizer
+    # state (half their size): they still export and evaluate, but only the newest ones resume.
+    slim_kept_checkpoints: bool = True
     log_every: int = 10
     resume: str = "auto"  # auto | none | path of a step directory
     # A resumed run must keep windows_per_rank x ranks x grad_accumulation unless explicitly allowed.
@@ -336,15 +341,21 @@ class Trainer:
             raise FileNotFoundError(f"LeRobot training requires normalization statistics: {statistics_path}")
         statistics = lerobot_index.load_statistics(statistics_path)
         fields = dict(fields)
+        if fields.get("gripper_flip_dims", PolicyConfig.gripper_flip_dims):
+            # The index bounds describe the channels as recorded; the policy normalizes 1 - x on flipped dims,
+            # which those bounds would clip.
+            raise ValueError(
+                "LeRobot index statistics describe unflipped channels; set policy.gripper_flip_dims to []"
+            )
         indexed = statistics["action"]["parameterization"]
         absolute = tuple(statistics["action"]["absolute_dims"])
         parameterization = fields.setdefault("action_parameterization", indexed)
         if "absolute_action_dims" in fields:
             configured = lerobot_index.normalize_dims(fields["absolute_action_dims"], action_dim)
         else:
-            configured = absolute if indexed == "joint_delta" else ()
+            configured = absolute if indexed != "absolute" else ()
             fields["absolute_action_dims"] = list(configured)
-        if parameterization != indexed or (indexed == "joint_delta" and configured != absolute):
+        if parameterization != indexed or (indexed != "absolute" and configured != absolute):
             raise ValueError(
                 f"the index statistics describe {indexed!r} targets with absolute dims {list(absolute)}, the "
                 f"policy config {parameterization!r} with {list(configured)}; re-index with "
@@ -407,6 +418,7 @@ class Trainer:
             "action_scale",
             "gripper_flip_dims",
             "action_parameterization",
+            "rtc_max_prefix",
             "absolute_action_dims",
             "action_normalization",
             "state_normalization",
@@ -740,6 +752,12 @@ class Trainer:
                 )
                 if removed:
                     self._log_line({"event": "prune", "removed_steps": removed})
+                if self.config.slim_kept_checkpoints:
+                    slimmed = slim_checkpoints(
+                        self.output_dir, keep_last=self.config.keep_checkpoints, protect=self.step
+                    )
+                    if slimmed:
+                        self._log_line({"event": "slim", "slimmed_steps": slimmed})
 
     def _log_line(self, record: dict[str, Any]) -> None:
         if self.rank != 0:

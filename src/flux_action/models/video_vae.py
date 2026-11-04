@@ -112,7 +112,9 @@ def _torch_neighborhood_attention(
             logits = torch.einsum("brhd,brkhd->brhk", qf[:, start : start + rows].float(), kf[:, idx].float())
             logits = logits.mul_(dim**-0.5).masked_fill_(~ok[None, :, None], float("-inf"))
             weights = logits.softmax(dim=-1)
-            out[:, start : start + rows] = torch.einsum("brhk,brkhd->brhd", weights, vf[:, idx].float()).to(q.dtype)
+            out[:, start : start + rows] = torch.einsum("brhk,brkhd->brhd", weights, vf[:, idx].float()).to(
+                q.dtype
+            )
     return out.reshape(q.shape)
 
 

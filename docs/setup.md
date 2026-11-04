@@ -202,10 +202,13 @@ The NPZ contains `images.scene` and `images.wrist` as HWC uint8 RGB arrays, plus
 `state` as six float32 values in the delivered joint order: shoulder pan,
 shoulder lift, elbow flex, wrist flex, wrist roll, gripper. Arm joints use degrees;
 the gripper uses percentage points. This checkpoint predicts `(1, 42, 6)` absolute
-commands in those units, with no simulator-specific clipping.
+commands in those units, with no simulator-specific clipping. The package's normalization
+statistics fit arms calibrated with current LeRobot and read with `use_degrees=True` (the
+default). The checkpoint is a base for task adaptation rather than a zero-shot policy for new
+setups; train a LoRA on your task for useful behavior.
 
-Without a robot, take the observation from a recorded SO-101 LeRobot dataset. Index it with the
-checkpoint's stream names (`scene`, `wrist`) as in the
+Without a robot, take the observation from a recorded SO-101 LeRobot dataset in current
+calibration and degrees. Index it with the checkpoint's stream names (`scene`, `wrist`) as in the
 [SO-101 full fine-tuning section](so101-lora.md#optional-full-fine-tuning), then pick one frame:
 
 ```sh
@@ -374,9 +377,9 @@ policy.config.validate_inference()
 policy.save_pretrained("outputs/droid/inference-export")
 ```
 
-The current DROID training recipe uses `action_prediction_droid`, matching the prepared
-backend. Existing exports with `action_modality="action"` require reference inference:
-use `--no-compile-dit` with `serve-robolab` (and omit `--compile-dit` with `infer`).
+`prepare_inference()` supports any BF16 checkpoint with the default transformer layout, whatever
+its action modality, action size, chunk size, sampler or inference profile, and returns `False`
+otherwise. Native FP8r packages support only the released DROID configuration.
 Keep existing runs and exports in their saved namespace; changing the sampler preset
 does not rename their weights.
 
@@ -384,10 +387,12 @@ Exports contain the DiT and configuration with verified checksums; frozen encode
 external references and are not checksummed. They contain no training state.
 
 `predict_action_chunk` produces absolute commands in dataset units. For joint-delta policies,
-it integrates predicted deltas onto measured state. `select_action` queues `n_action_steps`
-commands before replanning and continues joint deltas from the last returned command.
+it integrates predicted deltas onto measured state; for joint-relative policies, it adds every
+predicted offset to the measured state at request time. `select_action` queues `n_action_steps`
+commands before replanning and continues joint deltas from the last returned command; a
+joint-relative chunk is anchored at the state measured when it was requested.
 Call `reset` at episode boundaries, interventions or task/batch changes. The application owns
-control timing and execution; RTC arguments are unsupported.
+control timing and execution; for real-time chunking see [Real-time chunking](#real-time-chunking).
 
 ### Camera layouts
 
@@ -403,7 +408,51 @@ do not pre-tile them for the Python API.
 
 See [SO-101 camera mapping](so101-lora.md#so-101-camera-keys-and-tiling) for its physical roles.
 `grid` supports custom layouts but requires training for that layout. Use the camera arrangement
-expected by your checkpoint.
+expected by your checkpoint. Cameras may differ in resolution: `droid` resizes every camera to
+360 × 640, the other layouts resize to the largest camera before composing. Pass cameras as separate
+streams rather than a pre-composed image, so training augmentation and camera dropout apply per camera.
+
+### Action parameterizations
+
+`action_parameterization` sets what the action tokens carry. Inference always returns absolute
+commands in dataset units. Channels in `absolute_action_dims`, typically grippers, stay absolute.
+
+| Mode | Targets | Suited to |
+|---|---|---|
+| `absolute` | Commands as recorded | The released DROID checkpoint; robots whose measured state lags or differs from commands |
+| `joint_delta` | Per-frame differences `a[t] - a[t-1]`, integrated at inference | Whole chunks executed open loop, as in the SO-101 recipe |
+| `joint_relative` | Commands minus the measured state at request time, one anchor per chunk | Frequent replanning on arms that track their commands closely |
+
+Index LeRobot data with the matching `--action-parameterization`, since the trainer requires the
+statistics and the policy to agree. To normalize with your own z-score statistics instead, set
+`action_normalization` or `state_normalization` to `{"mean": [...], "std": [...]}`; they are stored
+as range bounds `mean ± std`. When unsure, train short runs of two modes and compare them
+on the same evaluation seeds.
+
+End-effector action spaces are in progress. Until they land, end-effector poses can be converted
+in your own dataset code and trained as `absolute` actions. Feedback from users who tried this
+found that poses relative to the end-effector pose at the start of each chunk performed clearly
+better than absolute poses.
+
+### Real-time chunking
+
+Real-time chunking lets the robot keep moving while the next chunk is predicted. Train with
+`rtc_max_prefix` (for example 15), then pass the commands that will run during the prediction:
+
+```python
+chunk = policy.predict_action_chunk(observation, committed_actions=committed)  # (B, P, action_dim)
+```
+
+The first `P` commands come back unchanged and the rest continue smoothly from them. This works
+with `absolute` and `joint_relative` actions, on the reference and prepared BF16 paths but not on
+FP8r packages. In a control loop, start the next prediction in a background thread when `P`
+commands of the current chunk remain, pass those commands as `committed_actions`, and once they
+have been sent continue with `chunk[:, P:]`. `select_action` does the same with `rtc_overlap`, but
+the robot waits while it predicts.
+
+`P` must cover latency × control rate: 250 ms at 30 Hz is 8 commands, so use about 10. Measure the
+slowest prediction on the robot computer. With compilation and distillation we measured about
+140 ms on an RTX 5090; contact us if you need an optimized deployment checkpoint.
 
 ### Reference DROID inference settings
 

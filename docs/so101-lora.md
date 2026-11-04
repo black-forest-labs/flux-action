@@ -6,7 +6,7 @@ model and processor settings. This workflow uses LeRobot's trainer and adapter l
 standalone `flux-action` provides full fine-tuning and base-policy inference.
 
 The implementation is pinned to LeRobot
-[`c027ee36`](https://github.com/huggingface/collab-lerobot-nv-bfl-flux3/tree/c027ee363363f8d86767c66786c6891478564d6c).
+[`f6c0f192`](https://github.com/huggingface/lerobot/tree/f6c0f192952d0dfe5a48805f9688711294461bff).
 
 This guide includes the LeRobot installation steps in a separate environment.
 See the shared setup guide for [checkpoint formats](setup.md#choose-a-checkpoint).
@@ -31,11 +31,14 @@ See the shared setup guide for [checkpoint formats](setup.md#choose-a-checkpoint
 
 The prepared model package contains the pre/postprocessor JSONs and quantile safetensors
 for task LoRA; these statistics stay fixed during training. No separate statistics file is needed.
-They are a choice for this adaptation workflow, not universal SO-101 calibration
-values: the upstream full-finetune used per-dataset normalization; see the
-[historical dataset bounds](../configs/so101/community_corpus.json). Use consistent
-joint order/units/calibration. If adapting with a different normalization, choose it
-before training and keep it for that adapter's inference and resume.
+They fit arms calibrated with current LeRobot and read with `use_degrees=True` (the default):
+they are the median statistics of the training datasets recorded with that calibration. The
+upstream full-finetune normalized each dataset separately; see the
+[historical dataset bounds](../configs/so101/community_corpus.json). Keep joint order, units and
+calibration the same for recording, training and inference. Record task datasets with current
+LeRobot and `use_degrees=True`; datasets recorded in the earlier -100 to 100 range mode or with the
+2024 calibration do not match these statistics. If adapting with a different normalization, choose
+it before training and keep it for that adapter's inference and resume.
 
 ## SO-101 camera keys and tiling
 
@@ -88,12 +91,12 @@ LeRobot is installed in its own Python 3.12 environment, separate from the `flux
 
 From this repository's root, check out the pinned LeRobot commit and create that environment
 with the training, FLUX Action, PEFT and EMA extras from the pinned
-[LeRobot setup instructions](https://github.com/huggingface/collab-lerobot-nv-bfl-flux3/blob/c027ee363363f8d86767c66786c6891478564d6c/docs/source/flux3.mdx#installation):
+[LeRobot setup instructions](https://github.com/huggingface/lerobot/blob/f6c0f192952d0dfe5a48805f9688711294461bff/docs/source/flux3.mdx#installation):
 
 ```sh
-git clone https://github.com/huggingface/collab-lerobot-nv-bfl-flux3.git ../lerobot-so101
+git clone https://github.com/huggingface/lerobot.git ../lerobot-so101
 cd ../lerobot-so101
-git checkout c027ee363363f8d86767c66786c6891478564d6c
+git checkout f6c0f192952d0dfe5a48805f9688711294461bff
 uv venv --python 3.12 .venv
 source .venv/bin/activate
 uv pip install -e ".[training,flux3,peft,diffusion]"
@@ -113,7 +116,7 @@ Download the policy package and shared encoders:
 ```sh
 hf auth login
 hf download black-forest-labs/flux-3-action-so101 \
-  --revision c9e13b2aca6a0a472b3ea03fd90cff32d3e85849 \
+  --revision e2584b2698e3b88368854976e354af87ec9893c6 \
   --local-dir models/flux-3-action-so101
 hf download black-forest-labs/flux-3-action-base \
   --revision 62878e2925e59b7a89ec14463ce89932624c490d \
@@ -179,7 +182,7 @@ lerobot-train \
 Evaluate both `pretrained_model` and `pretrained_model_ema` before choosing one for inference;
 keep the base and encoders accessible.
 The pinned
-[LeRobot inference guide](https://github.com/huggingface/collab-lerobot-nv-bfl-flux3/blob/c027ee363363f8d86767c66786c6891478564d6c/docs/source/flux3.mdx#inference)
+[LeRobot inference guide](https://github.com/huggingface/lerobot/blob/f6c0f192952d0dfe5a48805f9688711294461bff/docs/source/flux3.mdx#inference)
 covers policy loading, saved processors and reset behavior. Run the policy and both processors
 on every control tick, then reset all three between episodes.
 

@@ -16,7 +16,8 @@
 ``<root>/step-<N>/`` is written after ``N`` optimizer updates, the reference's naming, and holds
 
 * ``model/``      DCP: the policy's DiT parameters (dense or FSDP shards, resharded on load)
-* ``optimizer/``  DCP: AdamW state keyed by parameter name
+* ``optimizer/``  DCP: AdamW state keyed by parameter name; :func:`slim_checkpoints` removes it from older
+  checkpoints, which then still export and evaluate but no longer resume
 * ``ema_0p10/``, ``ema_0p05/``  DCP: the power-EMA shadow tensors of each profile
 * ``state.json``  rank 0: :class:`TrainState` (step, seeds, world size, EMA steps, loader position)
 * ``config.json`` rank 0: the ``PolicyConfig``, so :func:`export_policy` rebuilds the model without the run
@@ -195,6 +196,23 @@ def prune_checkpoints(root: str | Path, *, keep_last: int, keep_every: int | Non
     return removed
 
 
+def slim_checkpoints(root: str | Path, *, keep_last: int, protect: int) -> list[int]:
+    """Delete the optimizer state of every complete checkpoint except the newest ``keep_last`` and ``protect``.
+
+    The optimizer is half of a checkpoint (AdamW holds two fp32 moments per parameter) and only matters for
+    resuming, which starts from the newest checkpoint. Call on one rank only. Returns the slimmed steps."""
+    if keep_last < 1:
+        raise ValueError("keep_last must be positive")
+    steps = complete_checkpoints(root)
+    full = {step for step, _ in steps[-keep_last:]} | {protect}
+    slimmed = []
+    for step, path in steps:
+        if step not in full and (path / "optimizer").exists():
+            shutil.rmtree(path / "optimizer")
+            slimmed.append(step)
+    return slimmed
+
+
 def save_checkpoint(
     root: str | Path,
     *,
@@ -245,6 +263,11 @@ def load_checkpoint(
     path = Path(path)
     if not (path / COMPLETE_MARKER).exists():
         raise FileNotFoundError(f"{path} is not a complete checkpoint")
+    if optimizer is not None and not (path / "optimizer").exists():
+        raise ValueError(
+            f"{path} holds no optimizer state (slimmed by checkpoint retention); export or evaluate it, "
+            "or resume from a newer checkpoint"
+        )
     state = TrainState.from_json((path / "state.json").read_text())
     model_sd = {"model": get_model_state_dict(model)}
     _dcp_load(model_sd, path / "model")

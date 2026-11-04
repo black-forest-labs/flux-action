@@ -78,3 +78,29 @@ def integrate(targets: Tensor, state: Tensor, absolute_dims: tuple[int, ...]) ->
         dims = list(absolute_dims)
         out[..., dims] = targets[..., dims]
     return out
+
+
+def relative(actions: Tensor, reference: Tensor, absolute_dims: tuple[int, ...]) -> Tensor:
+    """``actions (B, K, D)`` and the measured state at request time ``reference (B, D)`` -> ``a[t] - reference``
+    for every frame (one anchor per chunk), with ``absolute_dims`` copied from ``actions`` unchanged."""
+    if reference.shape != (actions.shape[0], actions.shape[2]):
+        raise ValueError(
+            f"reference state must be (B, D) = {(actions.shape[0], actions.shape[2])}, got {tuple(reference.shape)}"
+        )
+    out = actions - reference[:, None]
+    if absolute_dims:
+        dims = list(absolute_dims)
+        out[..., dims] = actions[..., dims]
+    return out
+
+
+def from_relative(targets: Tensor, reference: Tensor, absolute_dims: tuple[int, ...]) -> Tensor:
+    """``targets (K, D)`` relative to the measured state at request time ``reference (D,)`` -> absolute
+    commands ``reference + targets``; ``absolute_dims`` are taken from ``targets`` as they are."""
+    if reference.shape != (targets.shape[-1],):
+        raise ValueError(f"reference state must be ({targets.shape[-1]},), got {tuple(reference.shape)}")
+    out = reference[None] + targets
+    if absolute_dims:
+        dims = list(absolute_dims)
+        out[..., dims] = targets[..., dims]
+    return out

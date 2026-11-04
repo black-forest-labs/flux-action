@@ -38,6 +38,7 @@ from flux_action.training.checkpoint import (
     save_checkpoint,
     seed_everything,
     set_rng_state,
+    slim_checkpoints,
 )
 from flux_action.training.ema import DROID_POWER_EMA_SIGMA_RELS, PowerEMA
 from flux_action.training.schedule import build_lr_scheduler, droid_lr_lambdas, resume_lr_scheduler
@@ -225,3 +226,28 @@ def test_export_of_a_lean_policy_rebuilds_only_its_streams(tmp_path, train_batch
     assert tuple(restored.config.content_streams) == ("video", "video_cond")
     ema = export_policy(path, tmp_path / "lean_ema_export", profile=ema_folder(0.10))
     assert ema["tensors"] == len(policy.state_dict())
+
+
+def test_slimmed_checkpoints_export_but_do_not_resume(tmp_path):
+    policy, optimizer, _, emas = _setup()
+    for step in (2, 4, 6):
+        save_checkpoint(
+            tmp_path,
+            step=step,
+            model=policy,
+            optimizer=optimizer,
+            emas=emas,
+            state=TrainState(),
+            config=policy.config,
+        )
+    assert slim_checkpoints(tmp_path, keep_last=1, protect=6) == [2, 4]
+    assert slim_checkpoints(tmp_path, keep_last=1, protect=6) == []  # idempotent
+    assert not (tmp_path / "step-4" / "optimizer").exists() and (tmp_path / "step-6" / "optimizer").exists()
+    assert latest_checkpoint(tmp_path) == tmp_path / "step-6"
+    policy2, optimizer2, _, emas2 = _setup(seed=1)
+    with pytest.raises(ValueError, match="no optimizer state"):
+        load_checkpoint(tmp_path / "step-4", model=policy2, optimizer=optimizer2, emas=emas2)
+    assert load_checkpoint(tmp_path / "step-4", model=policy2, emas=emas2).step == 4
+    assert load_checkpoint(tmp_path / "step-6", model=policy2, optimizer=optimizer2, emas=emas2).step == 6
+    export_policy(tmp_path / "step-4", tmp_path / "export", profile=ema_folder(0.10))
+    assert (tmp_path / "export" / "model.safetensors").is_file()
