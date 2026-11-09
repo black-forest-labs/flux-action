@@ -190,3 +190,50 @@ def test_export_dtype(tmp_path):
         tmp_path / "bf16", video_vae=FakeVideoVAE(), text_encoder=MockTextEncoder(32)
     )
     assert next(restored.dit.parameters()).dtype == torch.bfloat16
+
+
+HISTORY_POLICY = dict(TINY_POLICY, inference_profile="history", n_obs_steps=8, gripper_flip_dims=[])
+RECEIVED = {}
+
+
+def build_with_history(config, *, n_obs_steps=None, **kwargs):
+    RECEIVED["n_obs_steps"] = n_obs_steps
+    return TwoEmbodimentWindows(**kwargs)
+
+
+def build_without_history(
+    config, seed, epoch, rank, world_size, num_workers, windows_per_rank, skip_batches, grad_accumulation
+):
+    return TwoEmbodimentWindows(
+        seed, epoch, rank, world_size, num_workers, windows_per_rank, skip_batches, grad_accumulation
+    )
+
+
+LOADER = dict(
+    seed=0,
+    epoch=0,
+    rank=0,
+    world_size=1,
+    num_workers=1,
+    windows_per_rank=2,
+    skip_batches=0,
+    grad_accumulation=1,
+)
+
+
+def test_history_profile_passes_n_obs_steps_to_the_plug(tmp_path):
+    config = make_config(tmp_path / "run", dataset=f"{__name__}:build_with_history", policy=HISTORY_POLICY)
+    RECEIVED.clear()
+    Trainer(config, policy_factory=tiny_policy).build()._make_dataset(LOADER)
+    assert RECEIVED == {"n_obs_steps": 8}
+    config = make_config(tmp_path / "run2", dataset=f"{__name__}:build_with_history")
+    RECEIVED.clear()
+    Trainer(config, policy_factory=tiny_policy).build()._make_dataset(LOADER)
+    assert RECEIVED == {"n_obs_steps": None}  # default profile: the argument is not passed
+
+
+def test_history_profile_rejects_a_plug_without_n_obs_steps(tmp_path):
+    config = make_config(tmp_path / "run", dataset=f"{__name__}:build_without_history", policy=HISTORY_POLICY)
+    trainer = Trainer(config, policy_factory=tiny_policy).build()
+    with pytest.raises(ValueError, match="does not accept n_obs_steps"):
+        trainer._make_dataset(LOADER)
