@@ -15,7 +15,7 @@ observed frame, then the frames the actions lead to), `state (D,)` float32, `act
 
 ## The config
 
-**`dataset = "pkg.module:callable"`.** The callable receives the `TrainConfig` and `seed, epoch, rank, world_size, num_workers, windows_per_rank, skip_batches, grad_accumulation`, and returns an iterable dataset with a `batches_per_rank` attribute that yields the windows above. Derive the sampling from `(seed, epoch, rank, position)` and skip the first `skip_batches`; resume is exact when you do. `index_dir` is ignored. A 60-line reference: `tests/training/test_embodiment_plug.py`.
+**`dataset = "pkg.module:callable"`.** The callable receives the `TrainConfig` and `seed, epoch, rank, world_size, num_workers, windows_per_rank, skip_batches, grad_accumulation`, and returns an iterable dataset with a `batches_per_rank` attribute that yields the windows above. Derive the sampling from `(seed, epoch, rank, position)` and skip the first `skip_batches`; resume is exact when you do. `index_dir` is ignored. Under `inference_profile: "history"` it also receives `n_obs_steps` and must yield history windows, as `WindowDataset(..., n_obs_steps=...)` does; a callable that does not accept the argument stops the run with an error. A 60-line reference: `tests/training/test_embodiment_plug.py`.
 
 **`frozen_steps`, `trunk_warmup_steps`, `heads_warmup_steps`.** The defaults (1000 / 2000 / 1000) fit a 30k-step
 run. For 3000 steps use 200 / 600 / 200; with the defaults the trunk never unfreezes.

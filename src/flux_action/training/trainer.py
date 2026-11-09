@@ -510,6 +510,38 @@ class Trainer:
             {"event": "resume", "from": str(path), "step": self.step, "mode": mode, "seed": self.state.seed}
         )
 
+    def _make_dataset(self, loader_kwargs: dict[str, Any]):
+        """The epoch's dataset. Under the history profile both the index loader and a dataset plug receive
+        ``n_obs_steps``; a plug that does not accept it is rejected here instead of yielding windows without
+        history."""
+        cfg = self.config
+        n_obs_steps = (
+            self.policy.config.n_obs_steps if self.policy.config.inference_profile == "history" else None
+        )
+        if self._build_dataset is None:
+            return WindowDataset(
+                self.manifest,
+                cfg.source_root,
+                self.rows_path,
+                **loader_kwargs,
+                decoder=cfg.decoder,
+                frame_hw=cfg.frame_hw,
+                visits_per_epoch=cfg.visits_per_epoch,
+                split="train",
+                n_obs_steps=n_obs_steps,
+            )
+        if n_obs_steps is None:
+            return self._build_dataset(cfg, **loader_kwargs)
+        try:
+            return self._build_dataset(cfg, **loader_kwargs, n_obs_steps=n_obs_steps)
+        except TypeError as error:
+            if "n_obs_steps" not in str(error):
+                raise
+            raise ValueError(
+                f"dataset plug {cfg.dataset!r} does not accept n_obs_steps, which the history inference profile "
+                "needs; yield history windows from the plug or train with the default profile"
+            ) from error
+
     # ------------------------------------------------------------------ loop
     def run(self) -> dict[str, Any]:
         self.build()
@@ -529,22 +561,7 @@ class Trainer:
                 skip_batches=self.position.batches_consumed,
                 grad_accumulation=cfg.grad_accumulation,
             )
-            if self._build_dataset is not None:
-                dataset = self._build_dataset(cfg, **loader_kwargs)
-            else:
-                dataset = WindowDataset(
-                    self.manifest,
-                    cfg.source_root,
-                    self.rows_path,
-                    **loader_kwargs,
-                    decoder=cfg.decoder,
-                    frame_hw=cfg.frame_hw,
-                    visits_per_epoch=cfg.visits_per_epoch,
-                    split="train",
-                    n_obs_steps=self.policy.config.n_obs_steps
-                    if self.policy.config.inference_profile == "history"
-                    else None,
-                )
+            dataset = self._make_dataset(loader_kwargs)
             if self.rank == 0 and self.position.batches_consumed == 0:
                 self._log_line(
                     {
