@@ -30,6 +30,29 @@ def natten_window(i: int, length: int, kernel: int, causal: bool) -> range:
     return range(start, start + kernel)
 
 
+@pytest.mark.parametrize(
+    "shape,kernel,causal",
+    [
+        ((2, 7, 9, 3, 16), [5, 5], None),
+        ((1, 8, 6, 2, 8), [4, 3], None),
+        ((1, 6, 7, 9, 2, 16), [5, 5, 5], [True, False, False]),
+        ((1, 3, 7, 9, 2, 16), [3, 5, 5], [True, False, False]),
+        ((2, 5, 6, 7, 2, 8), [3, 3, 5], [False, False, False]),
+    ],
+)
+def test_torch_neighborhood_attention_matches_natten(shape, kernel, causal):
+    from natten.functional import na2d, na3d
+
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(shape) for _ in range(3))
+    kwargs = {"attention_kwargs": {"backend": "flex-fna"}}
+    if len(kernel) == 2:
+        expected = na2d(q, k, v, kernel_size=kernel, **kwargs)
+    else:
+        expected = na3d(q, k, v, kernel_size=kernel, is_causal=causal, **kwargs)
+    torch.testing.assert_close(vv._torch_neighborhood_attention(q, k, v, kernel, causal), expected)
+
+
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("kernel", [3, 5])
 def test_temporal_core_halo_reproduces_full_sequence_neighborhoods(kernel, causal):
