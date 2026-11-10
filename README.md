@@ -41,3 +41,4 @@ See [checkpoint selection](docs/setup.md#choose-a-checkpoint) for commands.
 | [DROID full fine-tuning](docs/droid-finetune.md) | Prepare DROID data, run the reproduction recipe, resume and export |
 | [SO-101 LoRA](docs/so101-lora.md) | Adapt the prepared SO-101 checkpoint to your task with LeRobot |
 | [Custom tasks and embodiments](docs/embodiments.md) | Define your own observations and actions, using games as a worked example |
+| [End-effector fine-tuning](examples/droid_ee50/README.md) | Fine-tune the pretrained end-effector (EE-50) heads on DROID's Cartesian poses |
