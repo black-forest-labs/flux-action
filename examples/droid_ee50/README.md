@@ -35,9 +35,9 @@ positions:
 | 10–14 | Abduction of thumb, index, middle, ring, little: the signed angle, in the palm plane, of the finger's first segment (fingers: MCP to PIP; thumb: base to tip), measured from `forward` about `normal` |
 | 15 | Thumb opposition: `arcsin(unit(thumb_tip - wrist) · normal)` |
 
-The palm frame is `forward = unit(middle_MCP - wrist)` and `normal = unit((little_MCP - index_MCP) × forward)`.
-Both hands use the same formulas without mirroring, so mirrored left and right poses give the same abduction
-and opposite opposition.
+The palm frame is `forward = unit(middle_MCP - wrist)` and
+`normal = unit((little_MCP - index_MCP) × forward)`. Both hands use the same formulas without mirroring,
+so mirrored left and right poses give the same abduction and opposite opposition.
 
 A window has 33 rows at offsets 0–32 from its anchor. Row 0 is the conditioning `state`, the anchor itself
 (the identity pose and the current gripper). Rows 1–32 are the `action` targets. DROID windows are
@@ -131,6 +131,8 @@ as in the joint-space recipe.
 
 For your own robot, build windows with `ee50.relative_rows` and the anchor convention above. Add the raw
 window of every anchor of your data with `ee50.Moments.add_window`, turn the sums into statistics with
-`ee50.finalize`, and yield the normalized rows from a plug like `dataset.py`. A second arm fills the right block and a hand the hand channels. The pretrained heads expect
-the conventions on this page.
-Statistics from your own data replace the DROID file.
+`ee50.finalize`, and yield the normalized rows from a plug like `dataset.py`. Statistics from your own data
+replace the DROID file.
+
+A second arm fills the right block, and a hand fills the hand channels. The pretrained heads expect the
+conventions on this page.
